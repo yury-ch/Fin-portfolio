@@ -113,10 +113,69 @@ class ServiceClient:
                 if data.get('success'):
                     records = data.get('data', [])
                     if records:
-                        return pd.DataFrame(records)
+                        # Convert to DataFrame with proper datetime index
+                        df = pd.DataFrame(records)
+                        if not df.empty:
+                            # Ensure datetime index
+                            if 'Date' in df.columns:
+                                df.set_index('Date', inplace=True)
+                            df.index = pd.to_datetime(df.index)
+                        return df
             return None
         except Exception as e:
             st.error(f"Error getting stock data: {e}")
+            return None
+    
+    def optimize_portfolio_with_calculation_service(self, prices_df: pd.DataFrame, tickers: List[str], 
+                                                  investment_amount: float, risk_aversion: float,
+                                                  min_weight_threshold: float, min_holdings: int) -> Optional[dict]:
+        """Optimize portfolio using calculation service"""
+        try:
+            # For now, we'll implement a simplified optimization here
+            # since the calculation service needs more integration work
+            from pypfopt import EfficientFrontier, risk_models, expected_returns, DiscreteAllocation, get_latest_prices
+            
+            # Compute expected returns and covariance
+            mu = expected_returns.mean_historical_return(prices_df, frequency=252)
+            S = risk_models.sample_cov(prices_df, frequency=252)
+            
+            # Optimize
+            ef = EfficientFrontier(mu, S)
+            ef.add_constraint(lambda w: w >= 0.001)
+            weights = ef.max_quadratic_utility(risk_aversion=risk_aversion)
+            
+            # Clean weights
+            weights = {k: v for k, v in weights.items() if v >= min_weight_threshold/100}
+            if len(weights) < min_holdings:
+                # Keep top holdings
+                all_weights = dict(sorted(ef.clean_weights().items(), key=lambda x: x[1], reverse=True))
+                weights = dict(list(all_weights.items())[:max(min_holdings, len([w for w in all_weights.values() if w > 0]))])
+            
+            # Renormalize
+            total = sum(weights.values())
+            weights = {k: v/total for k, v in weights.items()}
+            
+            # Get performance
+            ef_clean = EfficientFrontier(mu, S)
+            ef_clean.set_weights(weights)
+            performance = ef_clean.portfolio_performance(verbose=False)
+            
+            # Discrete allocation
+            latest_prices = get_latest_prices(prices_df)
+            da = DiscreteAllocation(weights, latest_prices, total_portfolio_value=investment_amount)
+            allocation, leftover = da.greedy_portfolio()
+            
+            return {
+                'weights': weights,
+                'expected_annual_return': performance[0],
+                'annual_volatility': performance[1], 
+                'sharpe_ratio': performance[2],
+                'allocation': allocation,
+                'leftover_cash': leftover
+            }
+            
+        except Exception as e:
+            st.error(f"Portfolio optimization failed: {e}")
             return None
 
 # Initialize Streamlit app
@@ -162,8 +221,13 @@ elif stock_selection == "Use Top Performers from Analysis":
     
     # Get cache info and analysis
     cache_info = client.get_cache_info()
+    needs_analysis = True
+    
     if cache_info and cache_info.get('has_cache') and not cache_info.get('is_stale'):
         st.sidebar.info(f"💾 Using cached data from {cache_info.get('last_updated')}")
+        needs_analysis = False
+    else:
+        st.sidebar.warning("🔄 No cached analysis available - will run fresh analysis")
     
     # Get S&P 500 tickers and run analysis
     sp500_tickers = client.get_sp500_tickers()
@@ -171,8 +235,9 @@ elif stock_selection == "Use Top Performers from Analysis":
         st.error("Could not fetch S&P 500 tickers from data service")
         st.stop()
     
-    # Get analysis (will use cache if available)
-    analysis_df = client.get_sp500_analysis(sp500_tickers, "1y", force_refresh=False)
+    # Get analysis (will use cache if available, or run fresh analysis)
+    with st.spinner("Getting S&P 500 analysis..." if needs_analysis else "Loading cached analysis..."):
+        analysis_df = client.get_sp500_analysis(sp500_tickers, "1y", force_refresh=needs_analysis)
     
     if analysis_df is not None and len(analysis_df) > 0:
         top_performers = analysis_df.head(num_top_stocks)
@@ -185,8 +250,9 @@ elif stock_selection == "Use Top Performers from Analysis":
             for i, row in top_performers.iterrows():
                 st.write(f"{row['ticker']}: {row['composite_score']:.3f}")
     else:
-        st.error("Could not get S&P 500 analysis from data service")
-        st.stop()
+        # If analysis fails, fall back to default tickers
+        st.sidebar.error("Analysis failed - using default top stocks")
+        tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX", "ADBE", "CRM"][:num_top_stocks]
 
 else:  # Custom from Analysis
     # Get S&P 500 tickers and run analysis
@@ -246,22 +312,76 @@ with tab1:
     
     st.success(f"Loaded data for {len(prices_df.columns)} stocks, {len(prices_df)} days")
     
-    # Note about calculation service integration
-    st.warning("🚧 Portfolio optimization integration with calculation service is in progress. The microservices architecture has been created but the optimization endpoint needs additional integration work.")
+    # Perform portfolio optimization
+    with st.spinner("Optimizing portfolio..."):
+        optimization_result = client.optimize_portfolio_with_calculation_service(
+            prices_df, tickers, investment, risk_aversion, min_weight_threshold, min_holdings
+        )
     
-    # Show the data we have
-    st.subheader("Stock Price Data (Last 10 Days)")
-    st.dataframe(prices_df.tail(10))
-    
-    # Show what would be optimized
-    st.subheader("Optimization Parameters")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Investment Amount", f"${investment:,}")
-        st.metric("Risk Aversion", f"{risk_aversion}")
-    with col2:
-        st.metric("Min Weight Threshold", f"{min_weight_threshold}%")
-        st.metric("Min Holdings", f"{min_holdings}")
+    if optimization_result:
+        st.success("✅ Portfolio optimization completed!")
+        
+        # Display results in columns
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric(
+                "Expected Annual Return", 
+                f"{optimization_result['expected_annual_return']:.1%}"
+            )
+        with col2:
+            st.metric(
+                "Annual Volatility", 
+                f"{optimization_result['annual_volatility']:.1%}"
+            )
+        with col3:
+            st.metric(
+                "Sharpe Ratio", 
+                f"{optimization_result['sharpe_ratio']:.2f}"
+            )
+        
+        # Optimal weights
+        st.subheader("🎯 Optimal Weights")
+        weights_df = pd.DataFrame([
+            {"Ticker": ticker, "Weight": f"{weight:.1%}", "Weight_Raw": weight}
+            for ticker, weight in optimization_result['weights'].items()
+        ]).sort_values('Weight_Raw', ascending=False)
+        
+        st.dataframe(weights_df[['Ticker', 'Weight']], use_container_width=True, hide_index=True)
+        
+        # Discrete allocation
+        st.subheader("💰 Share Allocation")
+        if optimization_result['allocation']:
+            allocation_df = pd.DataFrame([
+                {"Ticker": ticker, "Shares": shares, "Est. Value": f"${shares * prices_df[ticker].iloc[-1]:.0f}"}
+                for ticker, shares in optimization_result['allocation'].items()
+            ])
+            st.dataframe(allocation_df, use_container_width=True, hide_index=True)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total Invested", f"${investment - optimization_result['leftover_cash']:,.0f}")
+            with col2:
+                st.metric("Leftover Cash", f"${optimization_result['leftover_cash']:,.0f}")
+        
+        # Show recent price data
+        st.subheader("📊 Recent Price Data")
+        st.dataframe(prices_df.tail(10))
+        
+    else:
+        st.error("❌ Portfolio optimization failed. Please try with different parameters or check the services.")
+        
+        # Show the data we have for debugging
+        st.subheader("📊 Available Price Data (Last 10 Days)")
+        st.dataframe(prices_df.tail(10))
+        
+        st.subheader("🔧 Optimization Parameters")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Investment Amount", f"${investment:,}")
+            st.metric("Risk Aversion", f"{risk_aversion}")
+        with col2:
+            st.metric("Min Weight Threshold", f"{min_weight_threshold}%")
+            st.metric("Min Holdings", f"{min_holdings}")
 
 with tab2:
     st.header("🔍 S&P 500 Stock Analyzer")
