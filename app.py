@@ -23,6 +23,13 @@ from pypfopt import (
     get_latest_prices,
 )
 
+# -------------------------------
+# Global Constants for Data Persistence
+# -------------------------------
+DATA_DIR = Path("sp500_data")
+ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"
+METADATA_FILE = DATA_DIR / "metadata.parquet"
+
 st.set_page_config(page_title="S&P Portfolio Optimizer", layout="wide")
 
 st.title("📈 S&P 500 Portfolio Optimizer")
@@ -196,11 +203,8 @@ st.sidebar.markdown("---")
 st.sidebar.caption("Tip: For 5–10y analysis, use monthly data to reduce noise.")
 
 # -------------------------------
-# Data Persistence Functions (Parquet) - Global Constants
+# Data Persistence Functions (Parquet)
 # -------------------------------
-DATA_DIR = Path("sp500_data")
-ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"
-METADATA_FILE = DATA_DIR / "metadata.parquet"
 
 def ensure_data_directory():
     """Create data directory if it doesn't exist"""
