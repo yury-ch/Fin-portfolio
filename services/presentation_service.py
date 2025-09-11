@@ -113,13 +113,13 @@ class ServiceClient:
                 if data.get('success'):
                     records = data.get('data', [])
                     if records:
-                        # Convert to DataFrame with proper datetime index
+                        # Convert to DataFrame - records are already in correct format
                         df = pd.DataFrame(records)
                         if not df.empty:
-                            # Ensure datetime index
-                            if 'Date' in df.columns:
-                                df.set_index('Date', inplace=True)
-                            df.index = pd.to_datetime(df.index)
+                            # Create a simple date index for the data
+                            df.index = pd.date_range(end=pd.Timestamp.now().date(), periods=len(df), freq='D')
+                            # Ensure numeric data types
+                            df = df.astype(float)
                         return df
             return None
         except Exception as e:
@@ -135,6 +135,18 @@ class ServiceClient:
             # For now, we'll implement a simplified optimization here
             # since the calculation service needs more integration work
             from pypfopt import EfficientFrontier, risk_models, expected_returns, DiscreteAllocation, get_latest_prices
+            
+            # Debug: check the data format
+            if prices_df.empty:
+                raise ValueError("Empty price DataFrame")
+            
+            # Ensure we have the right columns
+            available_tickers = [t for t in tickers if t in prices_df.columns]
+            if not available_tickers:
+                raise ValueError(f"None of the tickers {tickers} found in price data columns: {list(prices_df.columns)}")
+            
+            # Filter to only available tickers
+            prices_df = prices_df[available_tickers]
             
             # Compute expected returns and covariance
             mu = expected_returns.mean_historical_return(prices_df, frequency=252)
@@ -244,15 +256,26 @@ elif stock_selection == "Use Top Performers from Analysis":
         analysis_df = client.get_sp500_analysis(sp500_tickers, "1y", force_refresh=needs_analysis)
     
     if analysis_df is not None and len(analysis_df) > 0:
-        top_performers = analysis_df.head(num_top_stocks)
-        tickers = top_performers['ticker'].tolist()
-        
-        st.sidebar.success(f"Selected top {len(tickers)} performers")
-        
-        # Show the selected stocks
-        with st.sidebar.expander("View Selected Stocks"):
-            for i, row in top_performers.iterrows():
-                st.write(f"{row['ticker']}: {row['composite_score']:.3f}")
+        try:
+            top_performers = analysis_df.head(num_top_stocks)
+            ticker_col = 'ticker' if 'ticker' in top_performers.columns else 'Ticker'
+            if ticker_col in top_performers.columns:
+                tickers = top_performers[ticker_col].tolist()
+                st.sidebar.success(f"Selected top {len(tickers)} performers")
+                
+                # Show the selected stocks
+                with st.sidebar.expander("View Selected Stocks"):
+                    for i, row in top_performers.iterrows():
+                        score_col = 'composite_score' if 'composite_score' in row.index else 'Composite_Score'
+                        st.write(f"{row.get(ticker_col, f'Stock_{i}')}: {row.get(score_col, 0):.3f}")
+            else:
+                # If no ticker column, fall back to default stocks
+                st.sidebar.warning("No ticker column in analysis data - using default stocks")
+                tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX", "ADBE", "CRM"][:num_top_stocks]
+        except Exception as e:
+            # If there's an error accessing the data, fall back to default tickers
+            st.sidebar.warning(f"Analysis data error: {str(e)[:50]}... - using default stocks")
+            tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX", "ADBE", "CRM"][:num_top_stocks]
     else:
         # If analysis fails, fall back to default tickers
         st.sidebar.error("Analysis failed - using default top stocks")
@@ -268,10 +291,11 @@ else:  # Custom from Analysis
     analysis_df = client.get_sp500_analysis(sp500_tickers, "1y", force_refresh=False)
     
     if analysis_df is not None and len(analysis_df) > 0:
+        ticker_col = 'ticker' if 'ticker' in analysis_df.columns else 'Ticker'
         selected_tickers = st.sidebar.multiselect(
             "Select stocks from analysis",
-            options=analysis_df['ticker'].tolist(),
-            default=analysis_df['ticker'].head(10).tolist()
+            options=analysis_df[ticker_col].tolist(),
+            default=analysis_df[ticker_col].head(10).tolist()
         )
         tickers = selected_tickers
     else:
@@ -439,22 +463,55 @@ with tab2:
             for i, (_, row) in enumerate(top_10.iterrows(), 1):
                 col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
                 with col1:
-                    st.metric(f"#{i}", row['ticker'])
+                    ticker_col = 'ticker' if 'ticker' in row.index else 'Ticker'
+                    st.metric(f"#{i}", row.get(ticker_col, f'Stock_{i}'))
                 with col2:
-                    st.metric("Score", f"{row['composite_score']:.3f}")
+                    score_col = 'composite_score' if 'composite_score' in row.index else 'Composite_Score'
+                    st.metric("Score", f"{row.get(score_col, 0):.3f}")
                 with col3:
-                    st.metric("Return", f"{row['total_return_pct']:.1f}%")
+                    return_col = 'total_return_pct' if 'total_return_pct' in row.index else 'Annual_Return'
+                    return_val = row.get(return_col, 0)
+                    # Convert to percentage if it's not already
+                    if return_col == 'total_return_pct':
+                        st.metric("Return", f"{return_val:.1f}%")
+                    else:
+                        st.metric("Return", f"{return_val*100:.1f}%")
                 with col4:
-                    st.metric("Sharpe", f"{row['sharpe_ratio']:.2f}")
+                    sharpe_col = 'sharpe_ratio' if 'sharpe_ratio' in row.index else 'Sharpe_Ratio'
+                    st.metric("Sharpe", f"{row.get(sharpe_col, 0):.2f}")
             
             st.subheader("📊 Full Analysis Results")
             
             # Display controls
-            display_cols = st.multiselect(
+            # Create a mapping of display names to actual column names
+            column_mapping = {}
+            for col in analysis_df.columns:
+                if col.lower() == 'ticker':
+                    column_mapping['Ticker'] = col
+                elif col.lower() == 'composite_score':
+                    column_mapping['Composite_Score'] = col
+                elif col.lower() in ['total_return_pct', 'annual_return']:
+                    column_mapping['Return'] = col
+                elif col.lower() in ['volatility_pct', 'volatility']:
+                    column_mapping['Volatility'] = col
+                elif col.lower() == 'sharpe_ratio':
+                    column_mapping['Sharpe_Ratio'] = col
+                elif col.lower() == 'current_price':
+                    column_mapping['Current_Price'] = col
+                else:
+                    column_mapping[col] = col
+            
+            default_cols = ['Ticker', 'Composite_Score', 'Return', 'Volatility', 'Sharpe_Ratio', 'Current_Price']
+            available_defaults = [col for col in default_cols if col in column_mapping]
+            
+            display_cols_display = st.multiselect(
                 "Select columns to display:",
-                options=analysis_df.columns.tolist(),
-                default=['ticker', 'composite_score', 'total_return_pct', 'volatility_pct', 'sharpe_ratio', 'current_price']
+                options=list(column_mapping.keys()),
+                default=available_defaults
             )
+            
+            # Map back to actual column names
+            display_cols = [column_mapping[col] for col in display_cols_display]
             
             if display_cols:
                 st.dataframe(analysis_df[display_cols], use_container_width=True)
