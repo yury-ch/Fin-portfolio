@@ -127,8 +127,9 @@ class ServiceClient:
             return None
     
     def optimize_portfolio_with_calculation_service(self, prices_df: pd.DataFrame, tickers: List[str], 
-                                                  investment_amount: float, risk_aversion: float,
-                                                  min_weight_threshold: float, min_holdings: int) -> Optional[dict]:
+                                                  investment_amount: float, objective: str,
+                                                  min_weight_threshold: float, min_holdings: int,
+                                                  max_weight: float, target_return: float, risk_free: float) -> Optional[dict]:
         """Optimize portfolio using calculation service"""
         try:
             # For now, we'll implement a simplified optimization here
@@ -139,10 +140,17 @@ class ServiceClient:
             mu = expected_returns.mean_historical_return(prices_df, frequency=252)
             S = risk_models.sample_cov(prices_df, frequency=252)
             
-            # Optimize
+            # Optimize based on objective
             ef = EfficientFrontier(mu, S)
             ef.add_constraint(lambda w: w >= 0.001)
-            weights = ef.max_quadratic_utility(risk_aversion=risk_aversion)
+            ef.add_constraint(lambda w: w <= max_weight/100)  # Max weight constraint
+            
+            if objective == "Max Sharpe":
+                weights = ef.max_sharpe(risk_free_rate=risk_free/100)
+            elif objective == "Min Volatility (target return)":
+                weights = ef.efficient_return(target_return=target_return/100)
+            else:  # Target Return
+                weights = ef.efficient_return(target_return=target_return/100)
             
             # Clean weights
             weights = {k: v for k, v in weights.items() if v >= min_weight_threshold/100}
@@ -179,20 +187,16 @@ class ServiceClient:
             return None
 
 # Initialize Streamlit app
-st.set_page_config(page_title="S&P Portfolio Optimizer - Microservices", layout="wide")
-st.title("📈 S&P 500 Portfolio Optimizer (Microservices)")
-st.caption("Microservices-based portfolio optimizer with separate data, calculation, and presentation layers.")
+st.set_page_config(page_title="S&P Portfolio Optimizer", layout="wide")
+st.title("📈 S&P 500 Portfolio Optimizer")
+st.caption("Build an optimal S&P portfolio given a risk–return preference, investment amount, and horizon.")
 
 # Initialize service client
 client = ServiceClient()
 
-# Check service health
-st.sidebar.header("Service Status")
+# Check service health silently
 data_service_healthy = client.check_service_health(DATA_SERVICE_URL)
 calc_service_healthy = client.check_service_health(CALCULATION_SERVICE_URL)
-
-st.sidebar.success("✅ Data Service") if data_service_healthy else st.sidebar.error("❌ Data Service")
-st.sidebar.success("✅ Calculation Service") if calc_service_healthy else st.sidebar.error("❌ Calculation Service")
 
 if not data_service_healthy:
     st.error("⚠️ Data Service is not available. Please start the data service first.")
@@ -274,17 +278,27 @@ else:  # Custom from Analysis
         st.error("Could not get S&P 500 analysis from data service")
         st.stop()
 
-# Other parameters
-period = st.sidebar.selectbox("Lookback Period", ["1y", "2y", "5y"], index=0)
-interval = st.sidebar.selectbox("Data Frequency", ["1d", "1wk", "1mo"], index=0)
+# Other parameters to match original app exactly
+period = st.sidebar.selectbox("Investment horizon / Lookback window", ["1y","2y","3y","5y"], index=0)
+interval = st.sidebar.selectbox("Price frequency", ["1d","1wk","1mo"], index=0)
 
-risk_aversion = st.sidebar.slider("Risk Aversion", 0.1, 5.0, 1.0, 0.1)
+objective = st.sidebar.selectbox(
+    "Optimization objective",
+    ["Max Sharpe", "Min Volatility (target return)", "Target Return"],
+    index=0
+)
+risk_free = st.sidebar.number_input("Risk-free rate (annual, %)", value=4.0, step=0.25)
+target_return = st.sidebar.number_input("Target annual return (%)", value=10.0, step=0.5)
+
+max_weight = st.sidebar.slider("Max weight per stock (%)", min_value=5, max_value=50, value=30, step=1)
+l2_reg = st.sidebar.slider("L2 regularization (weight smoothing)", 0.0, 20.0, 5.0)
 min_weight_threshold = st.sidebar.slider("Prune weights below (%)", 0.0, 2.0, 0.25, 0.05)
 min_holdings = st.sidebar.number_input("Minimum number of holdings", min_value=2, max_value=60, value=3, step=1)
+
 investment = st.sidebar.number_input("Total investment (USD)", value=250_000, step=10_000)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Microservices Architecture: Data, Calculation & Presentation layers are separated.")
+st.sidebar.caption("Tip: For 5–10y analysis, use monthly data to reduce noise.")
 
 # Create tabs
 tab1, tab2 = st.tabs(["📊 Portfolio Optimizer", "🔍 S&P 500 Stock Analyzer"])
@@ -315,7 +329,8 @@ with tab1:
     # Perform portfolio optimization
     with st.spinner("Optimizing portfolio..."):
         optimization_result = client.optimize_portfolio_with_calculation_service(
-            prices_df, tickers, investment, risk_aversion, min_weight_threshold, min_holdings
+            prices_df, tickers, investment, objective, min_weight_threshold, min_holdings,
+            max_weight, target_return, risk_free
         )
     
     if optimization_result:
@@ -456,12 +471,7 @@ with tab2:
         else:
             st.error("Could not get analysis results from data service")
 
-# Footer
-st.markdown("---")
-st.markdown("**Microservices Architecture:**")
-st.markdown("- **Data Service** (Port 8001): Handles yfinance API calls and data persistence")
-st.markdown("- **Calculation Service** (Port 8002): Performs portfolio optimization calculations")  
-st.markdown("- **Presentation Service** (This app): Streamlit UI that orchestrates service calls")
+# Clean up - no technical footer needed
 
 if __name__ == "__main__":
     # This would be run with: streamlit run services/presentation_service.py
