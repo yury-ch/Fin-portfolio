@@ -1,0 +1,13 @@
+# Original application dependencies
+streamlit
+yfinance
+pandas
+numpy<2
+PyPortfolioOpt
+
+# Microservices additional dependencies
+fastapi
+uvicorn[standard]
+pydantic
+requests
+python-multipart

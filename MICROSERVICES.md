@@ -1,0 +1,200 @@
+# S&P 500 Portfolio Optimizer - Microservices Architecture
+
+This document describes the refactored microservices architecture for the S&P 500 Portfolio Optimizer.
+
+## Architecture Overview
+
+The application has been decomposed into three main services:
+
+### 1. Data Service (`services/data_service.py`)
+- **Port:** 8001
+- **Responsibilities:**
+  - Yahoo Finance API integration via yfinance
+  - Data caching and persistence (Parquet files)
+  - S&P 500 stock analysis
+  - Rate limiting and batch processing
+- **Endpoints:**
+  - `GET /health` - Health check
+  - `POST /stock-data` - Get stock price data
+  - `POST /sp500-analysis` - Get S&P 500 analysis
+  - `GET /cache-info` - Get cache status
+  - `GET /sp500-tickers` - Get S&P 500 sample tickers
+- **API Documentation:** http://localhost:8001/docs
+
+### 2. Calculation Service (`services/calculation_service.py`)
+- **Port:** 8002
+- **Responsibilities:**
+  - Portfolio optimization using PyPortfolioOpt
+  - Statistical calculations (expected returns, covariance)
+  - Risk metrics and portfolio performance analysis
+- **Endpoints:**
+  - `GET /health` - Health check
+  - `POST /optimize-portfolio` - Optimize portfolio allocation
+  - `POST /portfolio-metrics` - Calculate portfolio metrics
+  - `POST /compute-stats` - Compute statistical measures
+- **API Documentation:** http://localhost:8002/docs
+
+### 3. Presentation Service (`services/presentation_service.py`)
+- **Streamlit Application**
+- **Responsibilities:**
+  - User interface and interaction handling
+  - Service orchestration and communication
+  - Data visualization and presentation
+- **Features:**
+  - Service health monitoring
+  - Real-time communication with backend services
+  - Comprehensive portfolio analysis UI
+
+## Quick Start
+
+### 1. Install Dependencies
+```bash
+pip install -r requirements-microservices.txt
+```
+
+### 2. Start All Services
+```bash
+python start-microservices.py
+```
+
+This will start:
+- Data Service on http://localhost:8001
+- Calculation Service on http://localhost:8002
+
+### 3. Start Presentation Layer
+In a separate terminal:
+```bash
+streamlit run services/presentation_service.py
+```
+
+### 4. Access the Application
+- **Web UI:** http://localhost:8501
+- **Data Service API:** http://localhost:8001/docs
+- **Calculation Service API:** http://localhost:8002/docs
+
+## Manual Service Startup
+
+If you prefer to start services individually:
+
+### Data Service
+```bash
+cd services
+python data_service.py
+```
+
+### Calculation Service  
+```bash
+cd services
+python calculation_service.py
+```
+
+### Presentation Service
+```bash
+streamlit run services/presentation_service.py
+```
+
+## Architecture Benefits
+
+### Scalability
+- Each service can be scaled independently
+- Data service can handle multiple analysis requests
+- Calculation service can be replicated for parallel optimization
+
+### Maintainability
+- Clear separation of concerns
+- Each service has a single responsibility
+- Easy to modify or replace individual components
+
+### Testability
+- Services can be tested in isolation
+- Mock services can be created for testing
+- API contracts are well-defined
+
+### Deployability
+- Services can be deployed separately
+- Rolling deployments possible
+- Different services can use different technologies
+
+## Data Flow
+
+1. **User Input** → Presentation Service
+2. **Stock Selection** → Data Service (S&P 500 analysis)
+3. **Price Data** → Data Service (historical prices)
+4. **Optimization** → Calculation Service (portfolio optimization)
+5. **Results** → Presentation Service → User
+
+## Service Communication
+
+Services communicate via HTTP REST APIs using:
+- **Request/Response Models:** Pydantic models in `shared/models.py`
+- **Error Handling:** Standardized error responses
+- **Timeouts:** Configured per endpoint based on expected processing time
+
+## Development
+
+### Adding New Endpoints
+1. Define request/response models in `shared/models.py`
+2. Implement endpoint in appropriate service
+3. Update client calls in presentation service
+4. Test API functionality
+
+### Extending Services
+- **Data Service:** Add new data sources or analysis methods
+- **Calculation Service:** Add new optimization algorithms
+- **Presentation Service:** Add new UI components or visualizations
+
+## Production Considerations
+
+### Docker Deployment
+Each service should be containerized with its own Dockerfile:
+- Data service with yfinance dependencies
+- Calculation service with PyPortfolioOpt
+- Presentation service with Streamlit
+
+### Load Balancing
+- Multiple instances of each service behind load balancers
+- Health checks for service discovery
+- Circuit breakers for fault tolerance
+
+### Database Integration
+- Replace Parquet files with proper database
+- Add database migration scripts
+- Implement connection pooling
+
+### Security
+- Add API authentication and authorization
+- Implement request rate limiting
+- Use HTTPS for all communication
+
+### Monitoring
+- Add logging and metrics collection  
+- Implement distributed tracing
+- Set up alerts for service failures
+
+## File Structure
+```
+fin-portfolio/
+├── services/
+│   ├── data_service.py          # Data layer microservice
+│   ├── calculation_service.py   # Calculation layer microservice  
+│   └── presentation_service.py  # UI layer microservice
+├── shared/
+│   └── models.py               # Shared data models
+├── sp500_data/                 # Data cache directory
+├── app.py                      # Original monolithic app
+├── requirements.txt            # Original dependencies
+├── requirements-microservices.txt  # Microservices dependencies
+├── start-microservices.py      # Service launcher script
+└── MICROSERVICES.md           # This documentation
+```
+
+## Migration from Monolith
+
+The original monolithic application (`app.py`) is preserved and continues to work. The microservices version provides:
+
+- **Better separation of concerns**
+- **Independent scaling capabilities**  
+- **Easier testing and maintenance**
+- **Foundation for cloud deployment**
+
+Both versions can coexist during the transition period.
