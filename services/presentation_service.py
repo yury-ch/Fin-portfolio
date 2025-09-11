@@ -393,7 +393,7 @@ with tab1:
         col1, col2 = st.columns(2)
         with col1:
             st.metric("Investment Amount", f"${investment:,}")
-            st.metric("Risk Aversion", f"{risk_aversion}")
+            st.metric("Optimization Objective", objective)
         with col2:
             st.metric("Min Weight Threshold", f"{min_weight_threshold}%")
             st.metric("Min Holdings", f"{min_holdings}")
