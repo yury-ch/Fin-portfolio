@@ -258,7 +258,7 @@ elif stock_selection == "Use Top Performers from Analysis":
     if analysis_df is not None and len(analysis_df) > 0:
         try:
             top_performers = analysis_df.head(num_top_stocks)
-            ticker_col = 'ticker' if 'ticker' in top_performers.columns else 'Ticker'
+            ticker_col = 'Ticker' if 'Ticker' in top_performers.columns else 'ticker'
             if ticker_col in top_performers.columns:
                 tickers = top_performers[ticker_col].tolist()
                 st.sidebar.success(f"Selected top {len(tickers)} performers")
@@ -291,7 +291,7 @@ else:  # Custom from Analysis
     analysis_df = client.get_sp500_analysis(sp500_tickers, "1y", force_refresh=False)
     
     if analysis_df is not None and len(analysis_df) > 0:
-        ticker_col = 'ticker' if 'ticker' in analysis_df.columns else 'Ticker'
+        ticker_col = 'Ticker' if 'Ticker' in analysis_df.columns else 'ticker'
         selected_tickers = st.sidebar.multiselect(
             "Select stocks from analysis",
             options=analysis_df[ticker_col].tolist(),
@@ -463,7 +463,7 @@ with tab2:
             for i, (_, row) in enumerate(top_10.iterrows(), 1):
                 col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
                 with col1:
-                    ticker_col = 'ticker' if 'ticker' in row.index else 'Ticker'
+                    ticker_col = 'Ticker' if 'Ticker' in row.index else 'ticker'
                     st.metric(f"#{i}", row.get(ticker_col, f'Stock_{i}'))
                 with col2:
                     score_col = 'composite_score' if 'composite_score' in row.index else 'Composite_Score'
@@ -484,19 +484,20 @@ with tab2:
             
             # Display controls
             # Create a mapping of display names to actual column names
+            # Create a mapping of display names to actual column names
             column_mapping = {}
             for col in analysis_df.columns:
-                if col.lower() == 'ticker':
+                if col in ['Ticker', 'ticker']:
                     column_mapping['Ticker'] = col
-                elif col.lower() == 'composite_score':
+                elif col in ['Composite_Score', 'composite_score']:
                     column_mapping['Composite_Score'] = col
-                elif col.lower() in ['total_return_pct', 'annual_return']:
+                elif col in ['Annual_Return', 'total_return_pct', 'annual_return']:
                     column_mapping['Return'] = col
-                elif col.lower() in ['volatility_pct', 'volatility']:
+                elif col in ['Volatility', 'volatility_pct', 'volatility']:
                     column_mapping['Volatility'] = col
-                elif col.lower() == 'sharpe_ratio':
+                elif col in ['Sharpe_Ratio', 'sharpe_ratio']:
                     column_mapping['Sharpe_Ratio'] = col
-                elif col.lower() == 'current_price':
+                elif col in ['Current_Price', 'current_price']:
                     column_mapping['Current_Price'] = col
                 else:
                     column_mapping[col] = col

@@ -196,17 +196,51 @@ async def health_check():
     return {"status": "healthy", "service": "calculation_service"}
 
 @app.post("/optimize-portfolio")
-async def optimize_portfolio(request: PortfolioOptimizationRequest):
+async def optimize_portfolio(payload: dict):
     """Optimize portfolio allocation"""
     try:
-        # This endpoint would typically receive price data from the data service
-        # For now, we'll expect it to be included in the request or fetched separately
+        # Extract parameters from payload
+        tickers = payload.get('tickers', [])
+        prices_data = payload.get('prices_data', {})
+        investment_amount = payload.get('investment_amount', 100000)
+        risk_aversion = payload.get('risk_aversion', 1.0)
+        min_weight_threshold = payload.get('min_weight_threshold', 0.0025)
+        min_holdings = payload.get('min_holdings', 3)
         
-        # In a real microservices setup, this would make a call to the data service
-        # For this example, we'll return an error asking for price data
-        raise HTTPException(
-            status_code=400, 
-            detail="Price data must be provided or fetched from data service"
+        if not tickers or not prices_data:
+            raise HTTPException(status_code=400, detail="Missing required parameters: tickers and prices_data")
+        
+        # Convert prices data back to DataFrame
+        prices_df = pd.DataFrame.from_dict(prices_data, orient='index')
+        prices_df.index = pd.to_datetime(prices_df.index)
+        
+        # Filter to only requested tickers
+        available_tickers = [t for t in tickers if t in prices_df.columns]
+        if not available_tickers:
+            raise HTTPException(status_code=400, detail="None of the requested tickers have price data")
+        
+        prices_df = prices_df[available_tickers]
+        
+        # Perform optimization
+        result = calculation_service.optimize_portfolio(
+            available_tickers, 
+            prices_df, 
+            investment_amount, 
+            risk_aversion, 
+            min_weight_threshold, 
+            min_holdings
+        )
+        
+        return ServiceResponse(
+            success=True,
+            data={
+                'weights': result.weights,
+                'expected_annual_return': result.expected_annual_return,
+                'annual_volatility': result.annual_volatility,
+                'sharpe_ratio': result.sharpe_ratio,
+                'allocation': result.allocation,
+                'leftover_cash': result.leftover_cash
+            }
         )
         
     except Exception as e:
