@@ -36,6 +36,56 @@ st.title("📈 S&P 500 Portfolio Optimizer")
 st.caption("Build an optimal S&P portfolio given a risk–return preference, investment amount, and horizon.")
 
 # -------------------------------
+# Column mapping for backwards compatibility
+# -------------------------------
+def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Standardize column names for backwards compatibility with cached data.
+    Maps old column names to new expected names.
+    """
+    if df.empty:
+        return df
+    
+    # Column mapping from old cached data to expected names
+    column_mapping = {
+        'ticker': 'Ticker',
+        'total_return_pct': 'Annual_Return',
+        'sharpe_ratio': 'Sharpe_Ratio', 
+        'volatility_pct': 'Volatility',
+        'max_drawdown_pct': 'Max_Drawdown',
+        'current_price': 'Current_Price',
+        'composite_score': 'Composite_Score'
+    }
+    
+    # Create a copy to avoid modifying original
+    df_copy = df.copy()
+    
+    # Rename columns that exist
+    for old_name, new_name in column_mapping.items():
+        if old_name in df_copy.columns:
+            df_copy.rename(columns={old_name: new_name}, inplace=True)
+    
+    # Add missing columns with default values if they don't exist
+    if 'Recent_3M_Return' not in df_copy.columns:
+        df_copy['Recent_3M_Return'] = 0.0  # Default to 0 for missing recent returns
+    
+    # Convert percentages from the old format (already in percentage) to decimal format expected by new code
+    if 'Annual_Return' in df_copy.columns:
+        # Check if values are already in percentage format (> 1 indicates percentage)
+        if df_copy['Annual_Return'].max() > 1:
+            df_copy['Annual_Return'] = df_copy['Annual_Return'] / 100.0
+    
+    if 'Volatility' in df_copy.columns:
+        if df_copy['Volatility'].max() > 1:
+            df_copy['Volatility'] = df_copy['Volatility'] / 100.0
+            
+    if 'Max_Drawdown' in df_copy.columns:
+        if df_copy['Max_Drawdown'].min() > -1:  # Old format might be positive percentage
+            df_copy['Max_Drawdown'] = -df_copy['Max_Drawdown'] / 100.0  # Convert to negative decimal
+    
+    return df_copy
+
+# -------------------------------
 # Sidebar: Inputs
 # -------------------------------
 st.sidebar.header("Inputs")
@@ -61,6 +111,9 @@ SP500_SAMPLE = [
 DEFAULT_TICKERS = [
     "AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META","BRK-B","JPM","V"
 ]
+
+# Investment horizon (needed for analysis period matching)
+horizon = st.sidebar.selectbox("Investment horizon / Lookback window", ["1y","2y","3y","5y"], index=0)
 
 # Stock selection options
 stock_selection = st.sidebar.radio(
@@ -93,6 +146,7 @@ elif stock_selection == "Use Top Performers from Analysis":
     if ANALYSIS_FILE.exists() and METADATA_FILE.exists():
         try:
             cached_df = pd.read_parquet(ANALYSIS_FILE)
+            cached_df = standardize_analysis_columns(cached_df)  # Standardize column names
             metadata_df = pd.read_parquet(METADATA_FILE)
             metadata = metadata_df.iloc[0].to_dict()
             
@@ -137,6 +191,7 @@ else:  # Custom from Analysis
     if ANALYSIS_FILE.exists() and METADATA_FILE.exists():
         try:
             cached_df = pd.read_parquet(ANALYSIS_FILE)
+            cached_df = standardize_analysis_columns(cached_df)  # Standardize column names
             metadata_df = pd.read_parquet(METADATA_FILE)
             metadata = metadata_df.iloc[0].to_dict()
             
@@ -181,7 +236,6 @@ else:  # Custom from Analysis
         st.sidebar.warning("⚠️ No analysis data. Run S&P 500 analyzer first.")
         TICKERS = DEFAULT_TICKERS
 
-horizon = st.sidebar.selectbox("Investment horizon / Lookback window", ["1y","2y","3y","5y"], index=0)
 interval = st.sidebar.selectbox("Price frequency", ["1d","1wk","1mo"], index=0)
 
 objective = st.sidebar.selectbox(
@@ -241,6 +295,7 @@ def load_analysis_data() -> Tuple[pd.DataFrame, dict]:
     try:
         # Load data
         df = pd.read_parquet(ANALYSIS_FILE)
+        df = standardize_analysis_columns(df)  # Standardize column names
         metadata = pd.read_parquet(METADATA_FILE).iloc[0].to_dict()
         
         return df, metadata
@@ -749,6 +804,7 @@ with tab1:
         if ANALYSIS_FILE.exists():
             try:
                 cached_df = pd.read_parquet(ANALYSIS_FILE)
+                cached_df = standardize_analysis_columns(cached_df)  # Standardize column names
                 # Filter to show only selected stocks
                 selected_analysis = cached_df[cached_df['Ticker'].isin(TICKERS)].copy()
                 if not selected_analysis.empty:
