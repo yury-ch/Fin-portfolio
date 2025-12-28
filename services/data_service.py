@@ -6,13 +6,13 @@
 
 import pandas as pd
 import numpy as np
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 import time
 import yfinance as yf
 from pathlib import Path
 from datetime import datetime, timedelta
 import logging
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 import sys
 import os
 
@@ -21,7 +21,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.models import (
     StockDataRequest, StockAnalysisRequest, ServiceResponse,
-    StockMetrics, AnalysisMetadata, CacheInfo
+    AnalysisMetadata, CacheInfo
 )
 
 # Configure logging
@@ -30,8 +30,10 @@ logger = logging.getLogger(__name__)
 
 # Constants
 DATA_DIR = Path("sp500_data")
-ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"
+ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"  # legacy single cache
 METADATA_FILE = DATA_DIR / "metadata.parquet"
+HIDDEN_ANALYSIS_COLUMNS = ['analysis_timestamp', 'analysis_period', 'data_through']
+ANALYSIS_PERIODS = ["1y", "2y", "3y"]
 
 # S&P 500 Top 100 stocks
 SP500_SAMPLE = [
@@ -42,13 +44,40 @@ SP500_SAMPLE = [
     "BAC","ACN","LLY","ORCL","WFC","VZ","CMCSA","CSCO","ABT","DHR",
     "NKE","TXN","PM","BMY","UNP","QCOM","RTX","HON","INTC","T",
     
-    # Next 50 (Large caps)
-    "LOW","UPS","SPGI","CAT","GS","MS","MDT","AXP","BLK","AMGN",
-    "DE","BKNG","SYK","TJX","GILD","ADP","MMC","CI","TMUS","ZTS",
-    "CME","SO","CSX","PLD","ITW","CB","DUK","AON","CL","BSX",
-    "FCX","EMR","NSC","SHW","MPC","PSX","GD","NOC","TGT","USB",
-    "KMI","F","SPG","ADSK","ROP","ICE","MCK","EOG","APD","COP"
+    # Next 50 (Large caps) 
+    "AMAT","SPGI","CAT","INTU","ISRG","NOW","LOW","GS","MS","AMD",
+    "AMGN","BKNG","TJX","BLK","AXP","SYK","VRTX","PLD","GILD","MDLZ",
+    "SBUX","TMUS","CVS","CI","LRCX","CB","MO","PYPL","MMC","SO",
+    "ZTS","SCHW","FIS","DUK","BSX","CL","ITW","EQIX","AON","CSX",
+    "ADI","NOC","MU","SHW","ICE","KLAC","APD","USB","CME","REGN",
+    "EMR","PNC","EOG","FCX","GD","NSC","TGT","HUM","COP","PSA"
 ]
+
+def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Align cached data with the expected analyzer schema."""
+    if df is None or df.empty:
+        return df
+    column_mapping = {
+        'ticker': 'Ticker',
+        'total_return_pct': 'Annual_Return',
+        'sharpe_ratio': 'Sharpe_Ratio',
+        'volatility_pct': 'Volatility',
+        'max_drawdown_pct': 'Max_Drawdown',
+        'current_price': 'Current_Price',
+        'composite_score': 'Composite_Score'
+    }
+    df = df.copy()
+    df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns}, inplace=True)
+    if 'Recent_3M_Return' not in df.columns:
+        df['Recent_3M_Return'] = 0.0
+    if 'Annual_Return' in df.columns and df['Annual_Return'].max() > 1:
+        df['Annual_Return'] = df['Annual_Return'] / 100.0
+    if 'Volatility' in df.columns and df['Volatility'].max() > 1:
+        df['Volatility'] = df['Volatility'] / 100.0
+    if 'Max_Drawdown' in df.columns and df['Max_Drawdown'].min() > -1:
+        df['Max_Drawdown'] = -df['Max_Drawdown'] / 100.0
+    return df
+
 
 class DataService:
     """Data Service for handling stock data download and persistence"""
@@ -57,86 +86,242 @@ class DataService:
         self.ensure_data_directory()
     
     def ensure_data_directory(self):
-        """Create data directory if it doesn't exist"""
         DATA_DIR.mkdir(exist_ok=True)
     
-    def save_analysis_data(self, df: pd.DataFrame, period: str):
-        """Save analysis results to parquet with metadata"""
-        try:
-            # Save main data
-            df.to_parquet(ANALYSIS_FILE)
-            
-            # Save metadata
-            metadata = pd.DataFrame([{
-                'last_updated': datetime.now(),
-                'period': period,
-                'num_stocks': len(df),
-                'version': '1.0'
-            }])
-            metadata.to_parquet(METADATA_FILE)
-            
-            logger.info(f"Saved analysis data for {len(df)} stocks")
-        except Exception as e:
-            logger.error(f"Error saving analysis data: {e}")
-            raise
+    def analysis_file_path(self, period: Optional[str] = None) -> Path:
+        if period:
+            return DATA_DIR / f"sp500_analysis_{period}.parquet"
+        return ANALYSIS_FILE
     
-    def load_analysis_data(self) -> Tuple[Optional[pd.DataFrame], Optional[dict]]:
-        """Load cached analysis data and metadata"""
+    def metadata_file_path(self, period: Optional[str] = None) -> Path:
+        if period:
+            return DATA_DIR / f"metadata_{period}.parquet"
+        return METADATA_FILE
+    
+    def clean_analysis_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        return df.drop(HIDDEN_ANALYSIS_COLUMNS, axis=1, errors='ignore')
+    
+    def save_analysis_data(self, df: pd.DataFrame, period: str, data_through: Optional[datetime] = None) -> dict:
+        """Persist analysis results and metadata for a specific period."""
+        self.ensure_data_directory()
+        analysis_ts = datetime.now()
+        df = df.copy()
+        df['analysis_timestamp'] = analysis_ts
+        df['analysis_period'] = period
+        if data_through is not None:
+            df['data_through'] = data_through
+        df.to_parquet(self.analysis_file_path(period), index=False)
+        metadata = {
+            'last_updated': analysis_ts,
+            'period': period,
+            'num_stocks': len(df),
+            'version': '1.0',
+            'data_through': data_through
+        }
+        pd.DataFrame([metadata]).to_parquet(self.metadata_file_path(period), index=False)
+        return metadata
+    
+    def format_metadata_for_response(self, metadata: Optional[dict]) -> Optional[dict]:
+        if metadata is None:
+            return None
+        formatted = {}
+        for key, value in metadata.items():
+            if isinstance(value, (pd.Timestamp, datetime)):
+                formatted[key] = value.isoformat()
+            else:
+                formatted[key] = value
+        return formatted
+    
+    def load_analysis_data(self, period: Optional[str] = None) -> Tuple[Optional[pd.DataFrame], Optional[dict]]:
+        """Load cached analysis for a given period (or legacy fallback)."""
+        data_path = self.analysis_file_path(period)
+        meta_path = self.metadata_file_path(period)
+        if not data_path.exists() or not meta_path.exists():
+            if period is not None and ANALYSIS_FILE.exists() and METADATA_FILE.exists():
+                try:
+                    legacy_meta = pd.read_parquet(METADATA_FILE).iloc[0].to_dict()
+                    if legacy_meta.get('period') == period:
+                        df = pd.read_parquet(ANALYSIS_FILE)
+                        df = self.clean_analysis_dataframe(standardize_analysis_columns(df))
+                        return df, legacy_meta
+                except Exception:
+                    return None, None
+            return None, None
         try:
-            if not ANALYSIS_FILE.exists() or not METADATA_FILE.exists():
-                return None, None
-            
-            df = pd.read_parquet(ANALYSIS_FILE)
-            metadata_df = pd.read_parquet(METADATA_FILE)
-            metadata = metadata_df.iloc[0].to_dict()
-            
+            df = pd.read_parquet(data_path)
+            df = self.clean_analysis_dataframe(standardize_analysis_columns(df))
+            metadata = pd.read_parquet(meta_path).iloc[0].to_dict()
             return df, metadata
-        except Exception as e:
-            logger.error(f"Error loading analysis data: {e}")
+        except Exception as exc:
+            logger.error(f"Error loading analysis data for {period}: {exc}")
             return None, None
     
-    def is_data_stale(self, metadata: dict, max_age_hours: int = 24) -> bool:
-        """Check if cached data is stale"""
+    def get_cached_analysis(self, period: str) -> Tuple[Optional[pd.DataFrame], Optional[dict]]:
+        return self.load_analysis_data(period)
+    
+    def is_data_stale(self, metadata: Optional[dict], max_age_hours: int = 24) -> bool:
         if not metadata:
             return True
-        
         last_updated = metadata.get('last_updated')
         if isinstance(last_updated, str):
             last_updated = pd.to_datetime(last_updated)
-        
         if not last_updated:
             return True
+        return (datetime.now() - last_updated) > timedelta(hours=max_age_hours)
+    
+    def compute_sp500_analysis(self, tickers: List[str], period: str = "1y") -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
+        """Replicates the Streamlit app's analyzer logic."""
+        results: List[Dict[str, Any]] = []
+        latest_data_timestamp: Optional[pd.Timestamp] = None
         
-        age = datetime.now() - last_updated
-        return age > timedelta(hours=max_age_hours)
+        for ticker in tickers:
+            try:
+                data = yf.download(ticker, period=period, interval="1d", progress=False)
+                if data.empty:
+                    continue
+                prices = data['Adj Close'] if 'Adj Close' in data.columns else data['Close']
+                returns = prices.pct_change().dropna()
+                if len(returns) < 60:
+                    continue
+                daily_log = np.log(prices).diff().dropna()
+                if daily_log.empty:
+                    continue
+                mean_log = daily_log.mean()
+                ann_return = float(np.exp(mean_log * 252) - 1)
+                ann_vol = float(returns.std() * np.sqrt(252))
+                sharpe = float(ann_return / ann_vol) if ann_vol > 0 else 0.0
+                cumulative = (1 + returns).cumprod()
+                rolling_max = cumulative.expanding().max()
+                drawdown = (cumulative - rolling_max) / rolling_max
+                max_drawdown = float(drawdown.min())
+                if len(prices) >= 63:
+                    recent_return = float((prices.iloc[-1] / prices.iloc[-63]) - 1)
+                else:
+                    recent_return = 0.0
+                current_price = float(prices.iloc[-1])
+                data_end = prices.index.max()
+                if isinstance(data_end, pd.Timestamp):
+                    if latest_data_timestamp is None or data_end > latest_data_timestamp:
+                        latest_data_timestamp = data_end
+                results.append({
+                    'Ticker': ticker,
+                    'Annual_Return': ann_return,
+                    'Volatility': ann_vol,
+                    'Sharpe_Ratio': sharpe,
+                    'Max_Drawdown': max_drawdown,
+                    'Recent_3M_Return': recent_return,
+                    'Current_Price': current_price
+                })
+            except Exception as exc:
+                logger.warning(f"Failed to analyze {ticker}: {exc}")
+                continue
+            time.sleep(0.2)
+        
+        if not results:
+            return pd.DataFrame(), latest_data_timestamp
+        df = pd.DataFrame(results)
+        
+        def safe_normalize(series: pd.Series, inverse: bool = False) -> pd.Series:
+            range_val = series.max() - series.min()
+            if range_val == 0:
+                return pd.Series([0.5] * len(series), index=series.index)
+            normalized = (series - series.min()) / range_val
+            return 1 - normalized if inverse else normalized
+        
+        df['Return_Score'] = safe_normalize(df['Annual_Return'])
+        df['Vol_Score'] = safe_normalize(df['Volatility'], inverse=True)
+        df['Sharpe_Score'] = safe_normalize(df['Sharpe_Ratio'])
+        df['Drawdown_Score'] = safe_normalize(df['Max_Drawdown'], inverse=True)
+        df['Momentum_Score'] = safe_normalize(df['Recent_3M_Return'])
+        df['Composite_Score'] = (
+            0.25 * df['Return_Score'] +
+            0.20 * df['Vol_Score'] +
+            0.25 * df['Sharpe_Score'] +
+            0.15 * df['Drawdown_Score'] +
+            0.15 * df['Momentum_Score']
+        )
+        df = df.sort_values('Composite_Score', ascending=False).reset_index(drop=True)
+        return df, latest_data_timestamp
+    
+    def analyze_sp500_stocks(self, tickers: List[str], period: str = "1y", force_refresh: bool = False) -> Tuple[pd.DataFrame, dict]:
+        """Analyze S&P 500 stocks with caching that mirrors the monolith behavior."""
+        if not force_refresh:
+            cached_df, metadata = self.get_cached_analysis(period)
+            if cached_df is not None and metadata is not None and not self.is_data_stale(metadata):
+                logger.info(f"Using cached analysis for {period}")
+                return cached_df, metadata
+        
+        logger.info(f"Running fresh analysis for {len(tickers)} tickers ({period})")
+        df, latest_ts = self.compute_sp500_analysis(tickers, period)
+        if df.empty:
+            raise HTTPException(status_code=500, detail="Analysis returned no data")
+        metadata = self.save_analysis_data(df, period, latest_ts)
+        df = self.clean_analysis_dataframe(df)
+        return df, metadata
     
     def get_cache_info(self) -> CacheInfo:
-        """Get cache status information"""
-        try:
-            cached_df, metadata = self.load_analysis_data()
-            
-            if cached_df is None or metadata is None:
-                return CacheInfo(has_cache=False, is_stale=True)
-            
+        """Aggregate cache metadata for all configured periods."""
+        period_details: Dict[str, AnalysisMetadata] = {}
+        latest_meta: Optional[AnalysisMetadata] = None
+        
+        for period in ANALYSIS_PERIODS:
+            _, metadata = self.get_cached_analysis(period)
+            if not metadata:
+                continue
             last_updated = metadata.get('last_updated')
             if isinstance(last_updated, str):
                 last_updated = pd.to_datetime(last_updated)
-            
-            age = datetime.now() - last_updated
-            age_hours = age.total_seconds() / 3600
-            is_stale = self.is_data_stale(metadata)
-            
-            return CacheInfo(
-                has_cache=True,
+            data_through = metadata.get('data_through')
+            if isinstance(data_through, str):
+                data_through = pd.to_datetime(data_through)
+            meta_model = AnalysisMetadata(
                 last_updated=last_updated,
-                age_hours=age_hours,
-                is_stale=is_stale,
-                period=metadata.get('period'),
-                num_stocks=metadata.get('num_stocks')
+                period=period,
+                num_stocks=metadata.get('num_stocks', 0),
+                version=metadata.get('version', '1.0'),
+                data_through=data_through
             )
-        except Exception as e:
-            logger.error(f"Error getting cache info: {e}")
+            period_details[period] = meta_model
+            if latest_meta is None or meta_model.last_updated > latest_meta.last_updated:
+                latest_meta = meta_model
+        
+        if not period_details:
             return CacheInfo(has_cache=False, is_stale=True)
+        
+        latest_age = (datetime.now() - latest_meta.last_updated).total_seconds() / 3600 if latest_meta else None
+        is_stale = self.is_data_stale({'last_updated': latest_meta.last_updated}) if latest_meta else True
+        
+        return CacheInfo(
+            has_cache=True,
+            last_updated=latest_meta.last_updated if latest_meta else None,
+            age_hours=latest_age,
+            is_stale=is_stale,
+            period=latest_meta.period if latest_meta else None,
+            num_stocks=latest_meta.num_stocks if latest_meta else None,
+            periods={k: v for k, v in period_details.items()}
+        )
+    
+    def clear_cache(self, period: Optional[str] = None) -> int:
+        """Delete cached analysis artifacts for a specific period or all periods."""
+        targets: List[Path] = []
+        if period:
+            targets.extend([self.analysis_file_path(period), self.metadata_file_path(period)])
+        else:
+            # All period-specific files plus legacy
+            for per in ANALYSIS_PERIODS:
+                targets.extend([self.analysis_file_path(per), self.metadata_file_path(per)])
+            targets.extend([ANALYSIS_FILE, METADATA_FILE])
+        removed = 0
+        for path in targets:
+            if path.exists():
+                try:
+                    path.unlink()
+                    removed += 1
+                except Exception as exc:
+                    logger.warning(f"Unable to delete {path}: {exc}")
+        return removed
     
     def load_prices(self, tickers: List[str], period: str, interval: str) -> pd.DataFrame:
         """Load stock prices using yfinance with error handling"""
@@ -282,97 +467,6 @@ class DataService:
         logger.info(f"Successfully loaded data for {len(successful_data)} tickers")
         return prices_df
     
-    def analyze_sp500_stocks(self, tickers: List[str], period: str = "1y", force_refresh: bool = False) -> pd.DataFrame:
-        """Analyze S&P 500 stocks with caching"""
-        
-        # Check cache first
-        if not force_refresh:
-            cached_df, metadata = self.load_analysis_data()
-            if cached_df is not None and metadata is not None:
-                if not self.is_data_stale(metadata) and metadata.get('period') == period:
-                    logger.info("Using cached analysis data")
-                    return cached_df
-        
-        logger.info(f"Analyzing {len(tickers)} stocks for period {period}")
-        
-        # Download fresh data
-        try:
-            prices = self.load_prices(tickers, period, "1d")
-        except Exception as e:
-            logger.error(f"Error loading prices: {e}")
-            # Return cached data if available
-            cached_df, _ = self.load_analysis_data()
-            if cached_df is not None:
-                return cached_df
-            raise HTTPException(status_code=500, detail=f"Failed to load stock data: {e}")
-        
-        results = []
-        
-        for ticker in prices.columns:
-            try:
-                stock = yf.Ticker(ticker)
-                info = stock.info
-                
-                price_series = prices[ticker].dropna()
-                if len(price_series) < 10:
-                    continue
-                
-                # Calculate metrics
-                returns = price_series.pct_change().dropna()
-                total_return = (price_series.iloc[-1] / price_series.iloc[0] - 1) * 100
-                volatility = returns.std() * np.sqrt(252) * 100
-                
-                # Sharpe ratio (assuming 2% risk-free rate)
-                excess_returns = returns - (0.02 / 252)
-                sharpe_ratio = excess_returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0
-                
-                # Maximum drawdown
-                cumulative = (1 + returns).cumprod()
-                running_max = cumulative.expanding().max()
-                drawdown = (cumulative - running_max) / running_max
-                max_drawdown = abs(drawdown.min()) * 100
-                
-                # Composite score (normalized)
-                return_score = min(max(total_return / 50, -1), 2)  # Normalize to -1 to 2
-                sharpe_score = min(max(sharpe_ratio / 2, -1), 2)   # Normalize to -1 to 2
-                volatility_score = max(min(2 - volatility / 25, 2), -1)  # Lower volatility = higher score
-                drawdown_score = max(min(2 - max_drawdown / 25, 2), -1)  # Lower drawdown = higher score
-                
-                composite_score = (return_score * 0.3 + sharpe_score * 0.3 + 
-                                 volatility_score * 0.2 + drawdown_score * 0.2)
-                
-                results.append({
-                    'ticker': ticker,
-                    'total_return_pct': round(total_return, 2),
-                    'volatility_pct': round(volatility, 2),
-                    'sharpe_ratio': round(sharpe_ratio, 3),
-                    'max_drawdown_pct': round(max_drawdown, 2),
-                    'composite_score': round(composite_score, 3),
-                    'current_price': round(price_series.iloc[-1], 2),
-                    'market_cap': info.get('marketCap'),
-                    'pe_ratio': info.get('forwardPE')
-                })
-                
-                # Rate limiting
-                time.sleep(0.05)
-                
-            except Exception as e:
-                logger.warning(f"Error analyzing {ticker}: {e}")
-                continue
-        
-        if not results:
-            raise HTTPException(status_code=500, detail="No stocks could be analyzed")
-        
-        df = pd.DataFrame(results)
-        df = df.sort_values('composite_score', ascending=False).reset_index(drop=True)
-        
-        # Save to cache
-        try:
-            self.save_analysis_data(df, period)
-        except Exception as e:
-            logger.warning(f"Could not save analysis data: {e}")
-        
-        return df
 
 # Initialize FastAPI app
 app = FastAPI(title="Data Service", description="Stock data download and analysis service")
@@ -403,14 +497,17 @@ async def get_stock_data(request: StockDataRequest):
 async def get_sp500_analysis(request: StockAnalysisRequest):
     """Get S&P 500 stock analysis"""
     try:
-        analysis_df = data_service.analyze_sp500_stocks(
+        analysis_df, metadata = data_service.analyze_sp500_stocks(
             request.tickers, 
             request.period, 
             request.force_refresh
         )
         return ServiceResponse(
             success=True,
-            data=analysis_df.to_dict('records')
+            data={
+                "records": analysis_df.to_dict('records'),
+                "metadata": data_service.format_metadata_for_response(metadata)
+            }
         )
     except Exception as e:
         logger.error(f"Error in get_sp500_analysis: {e}")
@@ -434,6 +531,15 @@ async def get_cache_info():
             success=False,
             error=str(e)
         )
+
+@app.delete("/cache")
+async def clear_cache(period: Optional[str] = Query(default=None, description="Period to clear (e.g., 1y). Omit to clear all.")):
+    """Clear cached analysis data."""
+    removed = data_service.clear_cache(period)
+    return ServiceResponse(
+        success=True,
+        data={"files_removed": removed, "period": period}
+    )
 
 @app.get("/sp500-tickers")
 async def get_sp500_tickers():

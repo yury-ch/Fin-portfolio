@@ -1,313 +1,204 @@
-# services/presentation_service.py
-# -------------------------------
-# Presentation Service - UI Layer
-# Streamlit frontend that orchestrates calls to data and calculation services
-# -------------------------------
+import os
+import sys
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
-import streamlit as st
 import pandas as pd
 import requests
-import json
-from typing import List, Dict, Optional
-import sys
-import os
-from datetime import datetime
+import streamlit as st
 
-# Add parent directory to path for imports
+# Allow `shared` imports when running via `streamlit run services/presentation_service.py`
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from shared.models import (
-    StockDataRequest, StockAnalysisRequest, PortfolioOptimizationRequest,
-    ServiceResponse
-)
-
-# Service URLs (configured for local development)
 DATA_SERVICE_URL = "http://localhost:8001"
 CALCULATION_SERVICE_URL = "http://localhost:8002"
+ANALYSIS_PERIODS = ["1y", "2y", "3y"]
+DEFAULT_TICKERS = [
+    "AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META","BRK-B","JPM","V"
+]
+
+
+def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Mirror the monolith's analyzer schema."""
+    if df is None or df.empty:
+        return df
+    column_mapping = {
+        'ticker': 'Ticker',
+        'total_return_pct': 'Annual_Return',
+        'sharpe_ratio': 'Sharpe_Ratio',
+        'volatility_pct': 'Volatility',
+        'max_drawdown_pct': 'Max_Drawdown',
+        'current_price': 'Current_Price',
+        'composite_score': 'Composite_Score'
+    }
+    df = df.copy()
+    df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns}, inplace=True)
+    if 'Recent_3M_Return' not in df.columns:
+        df['Recent_3M_Return'] = 0.0
+    if 'Annual_Return' in df.columns and df['Annual_Return'].max() > 1:
+        df['Annual_Return'] = df['Annual_Return'] / 100.0
+    if 'Volatility' in df.columns and df['Volatility'].max() > 1:
+        df['Volatility'] = df['Volatility'] / 100.0
+    if 'Max_Drawdown' in df.columns and df['Max_Drawdown'].min() > -1:
+        df['Max_Drawdown'] = -df['Max_Drawdown'] / 100.0
+    return df
+
+
+def format_timestamp(value: Optional[str]) -> str:
+    if not value or value == "Unknown":
+        return "Unknown"
+    try:
+        ts = pd.to_datetime(value)
+    except Exception:
+        return str(value)
+    return ts.strftime("%Y-%m-%d %H:%M")
+
 
 class ServiceClient:
-    """Client for communicating with microservices"""
-    
-    def __init__(self):
-        pass
-    
+    """Thin wrapper around the FastAPI services."""
+
     def check_service_health(self, service_url: str) -> bool:
-        """Check if a service is healthy"""
         try:
             response = requests.get(f"{service_url}/health", timeout=5)
             return response.status_code == 200
-        except:
+        except requests.RequestException:
             return False
-    
+
     def get_sp500_tickers(self) -> List[str]:
-        """Get S&P 500 sample tickers from data service"""
         try:
             response = requests.get(f"{DATA_SERVICE_URL}/sp500-tickers", timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success'):
-                    return data.get('data', [])
-            return []
-        except Exception as e:
-            st.error(f"Error fetching S&P 500 tickers: {e}")
-            return []
-    
-    def get_cache_info(self) -> Optional[dict]:
-        """Get cache information from data service"""
+            payload = response.json()
+            if payload.get("success"):
+                return payload.get("data", [])
+        except Exception as exc:
+            st.error(f"Failed to fetch S&P tickers: {exc}")
+        return []
+
+    def get_cache_info(self) -> Dict[str, dict]:
         try:
             response = requests.get(f"{DATA_SERVICE_URL}/cache-info", timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success'):
-                    return data.get('data')
-            return None
-        except Exception as e:
-            st.error(f"Error fetching cache info: {e}")
-            return None
-    
-    def get_sp500_analysis(self, tickers: List[str], period: str, force_refresh: bool = False) -> Optional[pd.DataFrame]:
-        """Get S&P 500 analysis from data service"""
+            payload = response.json()
+            if payload.get("success"):
+                return payload.get("data", {}).get("periods", {}) or {}
+        except Exception as exc:
+            st.warning(f"Unable to retrieve cache summary: {exc}")
+        return {}
+
+    def clear_cache(self, period: Optional[str]) -> bool:
         try:
-            request_data = {
+            params = {"period": period} if period else {}
+            response = requests.delete(f"{DATA_SERVICE_URL}/cache", params=params, timeout=30)
+            payload = response.json()
+            return payload.get("success", False)
+        except Exception as exc:
+            st.error(f"Cache clear failed: {exc}")
+            return False
+
+    def get_sp500_analysis(self, tickers: List[str], period: str, force_refresh: bool) -> Tuple[pd.DataFrame, dict]:
+        try:
+            payload = {
                 "tickers": tickers,
                 "period": period,
                 "force_refresh": force_refresh
             }
-            response = requests.post(
-                f"{DATA_SERVICE_URL}/sp500-analysis", 
-                json=request_data,
-                timeout=300  # 5 minutes for analysis
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success'):
-                    return pd.DataFrame(data.get('data', []))
-            
-            # Handle error response
-            if response.status_code != 200:
-                error_data = response.json()
-                st.error(f"Data service error: {error_data.get('error', 'Unknown error')}")
-            
-            return None
-        except Exception as e:
-            st.error(f"Error getting S&P 500 analysis: {e}")
-            return None
-    
-    def get_stock_data(self, tickers: List[str], period: str, interval: str) -> Optional[pd.DataFrame]:
-        """Get stock price data from data service"""
+            response = requests.post(f"{DATA_SERVICE_URL}/sp500-analysis", json=payload, timeout=600)
+            data = response.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Unknown analysis error"))
+            content = data.get("data", {})
+            df = pd.DataFrame(content.get("records", []))
+            df = standardize_analysis_columns(df)
+            metadata = content.get("metadata", {}) or {}
+            return df, metadata
+        except Exception as exc:
+            st.error(f"Analysis request failed: {exc}")
+            return pd.DataFrame(), {}
+
+    def get_stock_data(self, tickers: List[str], period: str, interval: str) -> pd.DataFrame:
         try:
-            request_data = {
+            payload = {"tickers": tickers, "period": period, "interval": interval}
+            response = requests.post(f"{DATA_SERVICE_URL}/stock-data", json=payload, timeout=180)
+            data = response.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Unknown data error"))
+            raw = data.get("data", {})
+            frame = pd.DataFrame.from_dict(raw, orient="index")
+            frame.index = pd.to_datetime(frame.index)
+            frame = frame.sort_index().apply(pd.to_numeric, errors="coerce")
+            frame = frame.ffill().dropna(how="all")
+            return frame
+        except Exception as exc:
+            st.error(f"Price download failed: {exc}")
+            return pd.DataFrame()
+
+    def optimize_portfolio(
+        self,
+        prices: pd.DataFrame,
+        tickers: List[str],
+        investment: float,
+        objective: str,
+        risk_free: float,
+        target_return: float,
+        max_weight: float,
+        l2_reg: float,
+        min_weight_threshold: float,
+        min_holdings: int,
+    ) -> Optional[dict]:
+        try:
+            payload = {
                 "tickers": tickers,
-                "period": period,
-                "interval": interval
+                "prices_data": {
+                    str(idx): {col: float(val) for col, val in row.items()}
+                    for idx, row in prices.round(6).iterrows()
+                },
+                "investment_amount": investment,
+                "objective": objective,
+                "risk_free": risk_free,
+                "target_return": target_return,
+                "max_weight": max_weight,
+                "l2_reg": l2_reg,
+                "min_weight_threshold": min_weight_threshold,
+                "min_holdings": min_holdings,
             }
-            response = requests.post(
-                f"{DATA_SERVICE_URL}/stock-data",
-                json=request_data,
-                timeout=120
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success'):
-                    raw_payload = data.get('data', {})
-                    if raw_payload:
-                        # API returns a dict keyed by date -> {ticker: price}
-                        if isinstance(raw_payload, dict):
-                            df = pd.DataFrame.from_dict(raw_payload, orient='index')
-                        else:
-                            df = pd.DataFrame(raw_payload)
-                        if not df.empty:
-                            df.index = pd.to_datetime(df.index)
-                            df.sort_index(inplace=True)
-                            df = df.astype(float)
-                        return df
-            return None
-        except Exception as e:
-            st.error(f"Error getting stock data: {e}")
-            return None
-    
-    def optimize_portfolio_with_calculation_service(self, prices_df: pd.DataFrame, tickers: List[str], 
-                                                  investment_amount: float, objective: str,
-                                                  min_weight_threshold: float, min_holdings: int,
-                                                  max_weight: float, target_return: float, risk_free: float) -> Optional[dict]:
-        """Optimize portfolio using calculation service"""
-        try:
-            # For now, we'll implement a simplified optimization here
-            # since the calculation service needs more integration work
-            from pypfopt import EfficientFrontier, risk_models, expected_returns, DiscreteAllocation, get_latest_prices
-            
-            # Debug: check the data format
-            if prices_df.empty:
-                raise ValueError("Empty price DataFrame")
-            
-            # Ensure we have the right columns
-            available_tickers = [t for t in tickers if t in prices_df.columns]
-            if not available_tickers:
-                raise ValueError(f"None of the tickers {tickers} found in price data columns: {list(prices_df.columns)}")
-            
-            # Filter to only available tickers
-            prices_df = prices_df[available_tickers]
-            
-            # Compute expected returns and covariance
-            mu = expected_returns.mean_historical_return(prices_df, frequency=252)
-            S = risk_models.sample_cov(prices_df, frequency=252)
-            
-            # Optimize based on objective
-            ef = EfficientFrontier(mu, S)
-            ef.add_constraint(lambda w: w >= 0.001)
-            ef.add_constraint(lambda w: w <= max_weight/100)  # Max weight constraint
-            
-            if objective == "Max Sharpe":
-                weights = ef.max_sharpe(risk_free_rate=risk_free/100)
-            elif objective == "Min Volatility (target return)":
-                weights = ef.efficient_return(target_return=target_return/100)
-            else:  # Target Return
-                weights = ef.efficient_return(target_return=target_return/100)
-            
-            # Clean weights
-            weights = {k: v for k, v in weights.items() if v >= min_weight_threshold/100}
-            if len(weights) < min_holdings:
-                # Keep top holdings
-                all_weights = dict(sorted(ef.clean_weights().items(), key=lambda x: x[1], reverse=True))
-                weights = dict(list(all_weights.items())[:max(min_holdings, len([w for w in all_weights.values() if w > 0]))])
-            
-            # Renormalize
-            total = sum(weights.values())
-            weights = {k: v/total for k, v in weights.items()}
-            
-            # Get performance
-            ef_clean = EfficientFrontier(mu, S)
-            ef_clean.set_weights(weights)
-            performance = ef_clean.portfolio_performance(verbose=False)
-            
-            # Discrete allocation
-            latest_prices = get_latest_prices(prices_df)
-            da = DiscreteAllocation(weights, latest_prices, total_portfolio_value=investment_amount)
-            allocation, leftover = da.greedy_portfolio()
-            
-            return {
-                'weights': weights,
-                'expected_annual_return': performance[0],
-                'annual_volatility': performance[1], 
-                'sharpe_ratio': performance[2],
-                'allocation': allocation,
-                'leftover_cash': leftover
-            }
-            
-        except Exception as e:
-            st.error(f"Portfolio optimization failed: {e}")
+            response = requests.post(f"{CALCULATION_SERVICE_URL}/optimize-portfolio", json=payload, timeout=120)
+            data = response.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Calculation service error"))
+            return data.get("data")
+        except Exception as exc:
+            st.error(f"Optimization call failed: {exc}")
             return None
 
-# Initialize Streamlit app
+
+client = ServiceClient()
+
 st.set_page_config(page_title="S&P Portfolio Optimizer", layout="wide")
 st.title("📈 S&P 500 Portfolio Optimizer")
 st.caption("Build an optimal S&P portfolio given a risk–return preference, investment amount, and horizon.")
 
-# Initialize service client
-client = ServiceClient()
+if 'analysis_cache' not in st.session_state:
+    st.session_state['analysis_cache'] = {}
+if 'cache_metadata' not in st.session_state:
+    st.session_state['cache_metadata'] = {}
+if 'recommended_tickers' not in st.session_state:
+    st.session_state['recommended_tickers'] = ",".join(DEFAULT_TICKERS)
+if 'sp500_tickers' not in st.session_state:
+    st.session_state['sp500_tickers'] = []
 
-# Check service health silently
-data_service_healthy = client.check_service_health(DATA_SERVICE_URL)
-calc_service_healthy = client.check_service_health(CALCULATION_SERVICE_URL)
-
-if not data_service_healthy:
-    st.error("⚠️ Data Service is not available. Please start the data service first.")
-    st.code("python services/data_service.py")
+if not client.check_service_health(DATA_SERVICE_URL):
+    st.error("⚠️ Data service is unavailable. Start it with `python services/data_service.py`.")
+    st.stop()
+if not client.check_service_health(CALCULATION_SERVICE_URL):
+    st.error("⚠️ Calculation service is unavailable. Start it with `python services/calculation_service.py`.")
     st.stop()
 
-# Input Parameters
+if not st.session_state['sp500_tickers']:
+    fetched = client.get_sp500_tickers()
+    st.session_state['sp500_tickers'] = fetched if fetched else DEFAULT_TICKERS
+
 st.sidebar.header("Inputs")
-
-# Stock selection method
-stock_selection = st.sidebar.selectbox(
-    "Stock Selection Method",
-    ["Manual Entry", "Use Top Performers from Analysis", "Custom from Analysis"]
-)
-
-if stock_selection == "Manual Entry":
-    default_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"]
-    tickers_input = st.sidebar.text_area(
-        "Tickers (comma-separated)", 
-        value=", ".join(default_tickers)
-    )
-    tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-
-elif stock_selection == "Use Top Performers from Analysis":
-    num_top_stocks = st.sidebar.slider("Number of top stocks", min_value=5, max_value=25, value=10, step=1)
-    
-    # Get cache info and analysis
-    cache_info = client.get_cache_info()
-    needs_analysis = True
-    
-    if cache_info and cache_info.get('has_cache') and not cache_info.get('is_stale'):
-        st.sidebar.info(f"💾 Using cached data from {cache_info.get('last_updated')}")
-        needs_analysis = False
-    else:
-        st.sidebar.warning("🔄 No cached analysis available - will run fresh analysis")
-    
-    # Get S&P 500 tickers and run analysis
-    sp500_tickers = client.get_sp500_tickers()
-    if not sp500_tickers:
-        st.error("Could not fetch S&P 500 tickers from data service")
-        st.stop()
-    
-    # Get analysis (will use cache if available, or run fresh analysis)
-    with st.spinner("Getting S&P 500 analysis..." if needs_analysis else "Loading cached analysis..."):
-        analysis_df = client.get_sp500_analysis(sp500_tickers, "1y", force_refresh=needs_analysis)
-    
-    if analysis_df is not None and len(analysis_df) > 0:
-        try:
-            top_performers = analysis_df.head(num_top_stocks)
-            ticker_col = 'Ticker' if 'Ticker' in top_performers.columns else 'ticker'
-            if ticker_col in top_performers.columns:
-                tickers = top_performers[ticker_col].tolist()
-                st.sidebar.success(f"Selected top {len(tickers)} performers")
-                
-                # Show the selected stocks
-                with st.sidebar.expander("View Selected Stocks"):
-                    for i, row in top_performers.iterrows():
-                        score_col = 'composite_score' if 'composite_score' in row.index else 'Composite_Score'
-                        st.write(f"{row.get(ticker_col, f'Stock_{i}')}: {row.get(score_col, 0):.3f}")
-            else:
-                # If no ticker column, fall back to default stocks
-                st.sidebar.warning("No ticker column in analysis data - using default stocks")
-                tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX", "ADBE", "CRM"][:num_top_stocks]
-        except Exception as e:
-            # If there's an error accessing the data, fall back to default tickers
-            st.sidebar.warning(f"Analysis data error: {str(e)[:50]}... - using default stocks")
-            tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX", "ADBE", "CRM"][:num_top_stocks]
-    else:
-        # If analysis fails, fall back to default tickers
-        st.sidebar.error("Analysis failed - using default top stocks")
-        tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX", "ADBE", "CRM"][:num_top_stocks]
-
-else:  # Custom from Analysis
-    # Get S&P 500 tickers and run analysis
-    sp500_tickers = client.get_sp500_tickers()
-    if not sp500_tickers:
-        st.error("Could not fetch S&P 500 tickers from data service")
-        st.stop()
-    
-    analysis_df = client.get_sp500_analysis(sp500_tickers, "1y", force_refresh=False)
-    
-    if analysis_df is not None and len(analysis_df) > 0:
-        ticker_col = 'Ticker' if 'Ticker' in analysis_df.columns else 'ticker'
-        selected_tickers = st.sidebar.multiselect(
-            "Select stocks from analysis",
-            options=analysis_df[ticker_col].tolist(),
-            default=analysis_df[ticker_col].head(10).tolist()
-        )
-        tickers = selected_tickers
-    else:
-        st.error("Could not get S&P 500 analysis from data service")
-        st.stop()
-
-# Other parameters to match original app exactly
-period = st.sidebar.selectbox("Investment horizon / Lookback window", ["1y","2y","3y","5y"], index=0)
-interval = st.sidebar.selectbox("Price frequency", ["1d","1wk","1mo"], index=0)
-
+horizon = st.sidebar.selectbox("Investment horizon / Lookback window", ["1y", "2y", "3y", "5y"], index=0)
+interval = st.sidebar.selectbox("Price frequency", ["1d", "1wk", "1mo"], index=0)
 objective = st.sidebar.selectbox(
     "Optimization objective",
     ["Max Sharpe", "Min Volatility (target return)", "Target Return"],
@@ -315,224 +206,236 @@ objective = st.sidebar.selectbox(
 )
 risk_free = st.sidebar.number_input("Risk-free rate (annual, %)", value=4.0, step=0.25)
 target_return = st.sidebar.number_input("Target annual return (%)", value=10.0, step=0.5)
-
 max_weight = st.sidebar.slider("Max weight per stock (%)", min_value=5, max_value=50, value=30, step=1)
 l2_reg = st.sidebar.slider("L2 regularization (weight smoothing)", 0.0, 20.0, 5.0)
 min_weight_threshold = st.sidebar.slider("Prune weights below (%)", 0.0, 2.0, 0.25, 0.05)
 min_holdings = st.sidebar.number_input("Minimum number of holdings", min_value=2, max_value=60, value=3, step=1)
-
 investment = st.sidebar.number_input("Total investment (USD)", value=250_000, step=10_000)
-
 st.sidebar.markdown("---")
 st.sidebar.caption("Tip: For 5–10y analysis, use monthly data to reduce noise.")
 
-# Create tabs
 tab1, tab2 = st.tabs(["📊 Portfolio Optimizer", "🔍 S&P 500 Stock Analyzer"])
 
-with tab1:
-    st.header("📊 Portfolio Optimizer")
-    
-    if not tickers:
-        st.warning("Please select at least one stock ticker")
-        st.stop()
-    
-    st.info(f"Optimizing portfolio with {len(tickers)} stocks: {', '.join(tickers)}")
-    
-    # Get stock data
-    with st.spinner("Fetching stock data from data service..."):
-        prices_df = client.get_stock_data(tickers, period, interval)
-    
-    if prices_df is None or prices_df.empty:
-        st.error("Could not fetch stock data from data service")
-        st.stop()
-    
-    # Convert back to proper DataFrame format
-    prices_df = pd.DataFrame(prices_df)
-    prices_df.index = pd.to_datetime(prices_df.index) if not isinstance(prices_df.index, pd.DatetimeIndex) else prices_df.index
-    
-    st.success(f"Loaded data for {len(prices_df.columns)} stocks, {len(prices_df)} days")
-    
-    # Perform portfolio optimization
-    with st.spinner("Optimizing portfolio..."):
-        optimization_result = client.optimize_portfolio_with_calculation_service(
-            prices_df, tickers, investment, objective, min_weight_threshold, min_holdings,
-            max_weight, target_return, risk_free
-        )
-    
-    if optimization_result:
-        st.success("✅ Portfolio optimization completed!")
-        
-        # Display results in columns
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric(
-                "Expected Annual Return", 
-                f"{optimization_result['expected_annual_return']:.1%}"
-            )
-        with col2:
-            st.metric(
-                "Annual Volatility", 
-                f"{optimization_result['annual_volatility']:.1%}"
-            )
-        with col3:
-            st.metric(
-                "Sharpe Ratio", 
-                f"{optimization_result['sharpe_ratio']:.2f}"
-            )
-        
-        # Optimal weights
-        st.subheader("🎯 Optimal Weights")
-        weights_df = pd.DataFrame([
-            {"Ticker": ticker, "Weight": f"{weight:.1%}", "Weight_Raw": weight}
-            for ticker, weight in optimization_result['weights'].items()
-        ]).sort_values('Weight_Raw', ascending=False)
-        
-        st.dataframe(weights_df[['Ticker', 'Weight']], use_container_width=True, hide_index=True)
-        
-        # Discrete allocation
-        st.subheader("💰 Share Allocation")
-        if optimization_result['allocation']:
-            allocation_df = pd.DataFrame([
-                {"Ticker": ticker, "Shares": shares, "Est. Value": f"${shares * prices_df[ticker].iloc[-1]:.0f}"}
-                for ticker, shares in optimization_result['allocation'].items()
-            ])
-            st.dataframe(allocation_df, use_container_width=True, hide_index=True)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Total Invested", f"${investment - optimization_result['leftover_cash']:,.0f}")
-            with col2:
-                st.metric("Leftover Cash", f"${optimization_result['leftover_cash']:,.0f}")
-        
-        # Show recent price data
-        st.subheader("📊 Recent Price Data")
-        st.dataframe(prices_df.tail(10))
-        
-    else:
-        st.error("❌ Portfolio optimization failed. Please try with different parameters or check the services.")
-        
-        # Show the data we have for debugging
-        st.subheader("📊 Available Price Data (Last 10 Days)")
-        st.dataframe(prices_df.tail(10))
-        
-        st.subheader("🔧 Optimization Parameters")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Investment Amount", f"${investment:,}")
-            st.metric("Optimization Objective", objective)
-        with col2:
-            st.metric("Min Weight Threshold", f"{min_weight_threshold}%")
-            st.metric("Min Holdings", f"{min_holdings}")
+
+def refresh_cache_summary():
+    st.session_state['cache_metadata'].update(client.get_cache_info())
+
+
+def get_analysis(period: str, force_refresh: bool = False) -> Tuple[pd.DataFrame, dict]:
+    cache_entry = st.session_state['analysis_cache'].get(period)
+    if cache_entry and not force_refresh:
+        return cache_entry['df'], cache_entry.get('metadata', {})
+    df, metadata = client.get_sp500_analysis(st.session_state['sp500_tickers'], period, force_refresh)
+    if not df.empty:
+        st.session_state['analysis_cache'][period] = {'df': df, 'metadata': metadata}
+        if metadata:
+            st.session_state['cache_metadata'][period] = metadata
+    return df, metadata
+
 
 with tab2:
     st.header("🔍 S&P 500 Stock Analyzer")
-    st.caption("Analyze top 100 S&P 500 stocks using the data microservice.")
-    
-    # Show cache status
-    cache_info = client.get_cache_info()
-    if cache_info and cache_info.get('has_cache'):
-        if cache_info.get('is_stale'):
-            st.warning(f"💾 Cached data is stale (from {cache_info.get('last_updated')})")
-        else:
-            st.info(f"💾 Fresh cached data available (from {cache_info.get('last_updated')})")
-    
+    st.caption("Analyze top 100 S&P 500 stocks via the data microservice.")
+    refresh_cache_summary()
+
+    period_options = ANALYSIS_PERIODS
+    cache_summary = st.session_state['cache_metadata']
+
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        analysis_period = st.selectbox("Analysis Period", ["1y", "2y", "5y"], index=0, key="analysis_period")
+        analysis_period = st.selectbox("Analysis period", period_options, index=0, key="analysis_period_micro")
     with col2:
-        force_refresh = st.button("🔄 Force Refresh")
+        analyze_button = st.button("🚀 Analyze Stocks", type="primary")
     with col3:
-        auto_analyze = st.checkbox("Auto-analyze", value=True)
-    
-    # Get S&P 500 tickers
-    sp500_tickers = client.get_sp500_tickers()
-    if not sp500_tickers:
-        st.error("Could not fetch S&P 500 tickers from data service")
-        st.stop()
-    
-    # Run analysis
-    if auto_analyze or force_refresh:
-        with st.spinner(f"Analyzing {len(sp500_tickers)} S&P 500 stocks via data service..."):
-            analysis_df = client.get_sp500_analysis(sp500_tickers, analysis_period, force_refresh)
-        
-        if analysis_df is not None and len(analysis_df) > 0:
-            st.success(f"Analysis completed for {len(analysis_df)} stocks")
-            
-            # Display results
-            st.subheader("📈 Top 10 Stock Recommendations")
-            top_10 = analysis_df.head(10)
-            
-            for i, (_, row) in enumerate(top_10.iterrows(), 1):
-                col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
-                with col1:
-                    ticker_col = 'Ticker' if 'Ticker' in row.index else 'ticker'
-                    st.metric(f"#{i}", row.get(ticker_col, f'Stock_{i}'))
-                with col2:
-                    score_col = 'composite_score' if 'composite_score' in row.index else 'Composite_Score'
-                    st.metric("Score", f"{row.get(score_col, 0):.3f}")
-                with col3:
-                    return_col = 'total_return_pct' if 'total_return_pct' in row.index else 'Annual_Return'
-                    return_val = row.get(return_col, 0)
-                    # Convert to percentage if it's not already
-                    if return_col == 'total_return_pct':
-                        st.metric("Return", f"{return_val:.1f}%")
-                    else:
-                        st.metric("Return", f"{return_val*100:.1f}%")
-                with col4:
-                    sharpe_col = 'sharpe_ratio' if 'sharpe_ratio' in row.index else 'Sharpe_Ratio'
-                    st.metric("Sharpe", f"{row.get(sharpe_col, 0):.2f}")
-            
-            st.subheader("📊 Full Analysis Results")
-            
-            # Display controls
-            # Create a mapping of display names to actual column names
-            # Create a mapping of display names to actual column names
-            column_mapping = {}
-            for col in analysis_df.columns:
-                if col in ['Ticker', 'ticker']:
-                    column_mapping['Ticker'] = col
-                elif col in ['Composite_Score', 'composite_score']:
-                    column_mapping['Composite_Score'] = col
-                elif col in ['Annual_Return', 'total_return_pct', 'annual_return']:
-                    column_mapping['Return'] = col
-                elif col in ['Volatility', 'volatility_pct', 'volatility']:
-                    column_mapping['Volatility'] = col
-                elif col in ['Sharpe_Ratio', 'sharpe_ratio']:
-                    column_mapping['Sharpe_Ratio'] = col
-                elif col in ['Current_Price', 'current_price']:
-                    column_mapping['Current_Price'] = col
-                else:
-                    column_mapping[col] = col
-            
-            default_cols = ['Ticker', 'Composite_Score', 'Return', 'Volatility', 'Sharpe_Ratio', 'Current_Price']
-            available_defaults = [col for col in default_cols if col in column_mapping]
-            
-            display_cols_display = st.multiselect(
-                "Select columns to display:",
-                options=list(column_mapping.keys()),
-                default=available_defaults
-            )
-            
-            # Map back to actual column names
-            display_cols = [column_mapping[col] for col in display_cols_display]
-            
-            if display_cols:
-                st.dataframe(analysis_df[display_cols], use_container_width=True)
-            
-            # Export option
-            if st.button("📥 Export to CSV"):
-                csv = analysis_df.to_csv(index=False)
-                st.download_button(
-                    label="Download CSV",
-                    data=csv,
-                    file_name=f"sp500_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
+        force_refresh = st.button("🔄 Force Refresh")
+
+    status_rows = []
+    for period in period_options:
+        meta = cache_summary.get(period)
+        if meta:
+            status_rows.append({
+                "Period": period,
+                "Last Analysis": format_timestamp(meta.get("last_updated")),
+                "Prices Through": format_timestamp(meta.get("data_through")),
+                "Stocks": meta.get("num_stocks", "—")
+            })
         else:
-            st.error("Could not get analysis results from data service")
+            status_rows.append({"Period": period, "Last Analysis": "Not run", "Prices Through": "—", "Stocks": "—"})
+    st.table(pd.DataFrame(status_rows).set_index("Period"))
 
-# Clean up - no technical footer needed
+    analysis_df, analysis_meta = st.session_state['analysis_cache'].get(analysis_period, {}).get('df'), \
+        st.session_state['analysis_cache'].get(analysis_period, {}).get('metadata')
 
-if __name__ == "__main__":
-    # This would be run with: streamlit run services/presentation_service.py
-    pass
+    if analyze_button or force_refresh or analysis_df is None:
+        with st.spinner("Requesting analysis from data service..."):
+            analysis_df, analysis_meta = get_analysis(analysis_period, force_refresh=force_refresh)
+
+    if analysis_df is not None and not analysis_df.empty:
+        st.subheader("🏆 Top 20 Stock Recommendations")
+        st.caption("Composite score blends return, Sharpe, low volatility/drawdown, and recent momentum.")
+        if analysis_meta:
+            ts = format_timestamp(analysis_meta.get("last_updated"))
+            thru = format_timestamp(analysis_meta.get("data_through"))
+            st.caption(f"Last analysis: {ts} | Prices through: {thru}")
+
+        display_cols = ['Ticker', 'Annual_Return', 'Sharpe_Ratio', 'Volatility',
+                        'Max_Drawdown', 'Recent_3M_Return', 'Current_Price', 'Composite_Score']
+        display_df = analysis_df[display_cols].head(20).copy()
+        display_df['Annual_Return'] = (display_df['Annual_Return'] * 100).round(2).astype(str) + '%'
+        display_df['Volatility'] = (display_df['Volatility'] * 100).round(2).astype(str) + '%'
+        display_df['Max_Drawdown'] = (display_df['Max_Drawdown'] * 100).round(2).astype(str) + '%'
+        display_df['Recent_3M_Return'] = (display_df['Recent_3M_Return'] * 100).round(2).astype(str) + '%'
+        display_df['Sharpe_Ratio'] = display_df['Sharpe_Ratio'].round(2)
+        display_df['Current_Price'] = '$' + display_df['Current_Price'].round(2).astype(str)
+        display_df['Composite_Score'] = display_df['Composite_Score'].round(3)
+        display_df.columns = ['Ticker', 'Annual Return', 'Sharpe Ratio', 'Volatility',
+                              'Max Drawdown', '3M Return', 'Price', 'Score']
+        st.dataframe(display_df, use_container_width=True)
+
+        col_a, col_b = st.columns([2, 1])
+        with col_a:
+            if st.button("📈 Use Top 20 for Portfolio Optimization", key="use_top20_micro"):
+                st.session_state['recommended_tickers'] = ",".join(analysis_df['Ticker'].head(20).tolist())
+                st.success("Top 20 tickers copied to optimizer tab.")
+        with col_b:
+            csv_data = analysis_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Download Full Analysis",
+                data=csv_data,
+                file_name=f"sp500_analysis_{analysis_period}.csv",
+                mime="text/csv"
+            )
+
+        with st.expander("🗄️ Data Management", expanded=False):
+            if st.button("🧹 Clear Cached Analysis for this Period"):
+                if client.clear_cache(analysis_period):
+                    st.session_state['analysis_cache'].pop(analysis_period, None)
+                    st.session_state['cache_metadata'].pop(analysis_period, None)
+                    st.success("Cache cleared.")
+                else:
+                    st.error("Failed to clear cache.")
+    else:
+        st.info("No analysis data available. Click 'Analyze Stocks' to start the computation.")
+
+
+with tab1:
+    st.subheader("Stock Selection Method")
+    stock_selection = st.radio(
+        "Choose how to feed tickers into the optimizer",
+        ["Manual Entry", "Use Top Performers from Analysis", "Custom from Analysis"],
+        horizontal=True
+    )
+
+    tickers: List[str] = []
+    custom_analysis_df: Optional[pd.DataFrame] = None
+
+    if stock_selection == "Manual Entry":
+        default_value = st.session_state.get('recommended_tickers', ",".join(DEFAULT_TICKERS))
+        tickers_str = st.text_area("Tickers (comma-separated)", value=default_value)
+        tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+        if st.button("🔄 Clear Recommendations"):
+            st.session_state['recommended_tickers'] = ",".join(DEFAULT_TICKERS)
+            st.experimental_rerun()
+    elif stock_selection == "Use Top Performers from Analysis":
+        num_top_stocks = st.slider("Number of top stocks", min_value=5, max_value=25, value=10, step=1)
+        cached_df, metadata = get_analysis(horizon, force_refresh=False)
+        if cached_df is not None and not cached_df.empty:
+            tickers = cached_df.head(num_top_stocks)['Ticker'].tolist()
+            if metadata:
+                freshness = format_timestamp(metadata.get("last_updated"))
+                st.success(f"Using cached analysis from {freshness}.")
+            st.session_state['recommended_tickers'] = ",".join(tickers)
+        else:
+            st.warning("No cached analysis available for this horizon. Falling back to defaults.")
+            tickers = DEFAULT_TICKERS
+    else:
+        custom_analysis_df, _ = get_analysis(horizon, force_refresh=False)
+        if custom_analysis_df is not None and not custom_analysis_df.empty:
+            options = custom_analysis_df['Ticker'].tolist()
+            default_choices = options[: min(10, len(options))]
+            selected = st.multiselect(
+                "Select stocks from analysis (top 20 shown)",
+                options=options[:20],
+                default=default_choices
+            )
+            tickers = selected if selected else default_choices
+            st.session_state['recommended_tickers'] = ",".join(tickers)
+        else:
+            st.warning("Analysis data unavailable; reverting to defaults.")
+            tickers = DEFAULT_TICKERS
+
+    if not tickers:
+        st.warning("No tickers provided. Using defaults.")
+        tickers = DEFAULT_TICKERS
+
+    st.info(f"Optimizing with {len(tickers)} tickers.")
+
+    prices_df = client.get_stock_data(tickers, horizon, interval)
+    if prices_df.empty:
+        st.error("Insufficient price data returned from the data service.")
+        st.stop()
+
+    st.subheader("Price Preview")
+    st.dataframe(prices_df.tail(), use_container_width=True)
+
+    with st.spinner("Optimizing portfolio..."):
+        optimization_result = client.optimize_portfolio(
+            prices=prices_df,
+            tickers=tickers,
+            investment=investment,
+            objective=objective,
+            risk_free=risk_free,
+            target_return=target_return,
+            max_weight=max_weight,
+            l2_reg=l2_reg,
+            min_weight_threshold=min_weight_threshold,
+            min_holdings=min_holdings
+        )
+
+    if not optimization_result:
+        st.error("Optimization failed. Adjust constraints or verify services are running.")
+        st.stop()
+
+    st.subheader("Optimal Weights")
+    weights_series = pd.Series(optimization_result['weights']).sort_values(ascending=False)
+    weights_display = pd.DataFrame({
+        "Ticker": weights_series.index,
+        "Weight": (weights_series * 100).round(2).astype(str) + '%'
+    })
+    st.dataframe(weights_display, use_container_width=True, hide_index=True)
+
+    perf = {
+        "Expected Return (annualized)": f"{optimization_result['expected_annual_return']*100:.2f}%",
+        "Expected Volatility (annualized)": f"{optimization_result['annual_volatility']*100:.2f}%",
+        f"Sharpe (rf={risk_free:.2f}%)": f"{optimization_result['sharpe_ratio']:.2f}"
+    }
+    st.subheader("Performance (Expected)")
+    st.table(pd.DataFrame(perf, index=["Metrics"]))
+
+    latest_prices = prices_df[weights_series.index].iloc[-1]
+    alloc_usd = weights_series * investment
+    allocation_df = pd.DataFrame({
+        "Ticker": weights_series.index,
+        "Weight": (weights_series * 100).round(2),
+        "Last Price": latest_prices.round(2),
+        "Allocation (USD)": alloc_usd.round(2)
+    })
+    st.subheader("Dollar Allocation")
+    st.dataframe(allocation_df, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Download Weights (CSV)",
+        data=weights_series.to_csv().encode("utf-8"),
+        file_name="weights.csv",
+        mime="text/csv"
+    )
+    st.download_button(
+        "Download Full Allocation (CSV)",
+        data=allocation_df.to_csv(index=False).encode("utf-8"),
+        file_name="allocation.csv",
+        mime="text/csv"
+    )
+
+    st.subheader("Historical Performance (Normalized)")
+    normalized = prices_df[weights_series.index] / prices_df[weights_series.index].iloc[0] * 100
+    st.line_chart(normalized)

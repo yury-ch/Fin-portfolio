@@ -57,96 +57,73 @@ class CalculationService:
             raise
     
     def enforce_min_holdings(self, weights: pd.Series, min_n: int, prune_below_pct: float) -> pd.Series:
-        """Enforce minimum number of holdings by pruning small weights"""
-        try:
-            # Remove tiny weights
-            weights = weights[weights >= prune_below_pct]
-            
-            # If we have fewer than min_n holdings, relax the pruning threshold
-            if len(weights) < min_n and prune_below_pct > 0:
-                logger.info(f"Only {len(weights)} holdings after pruning. Relaxing threshold to get {min_n} holdings.")
-                # Sort all weights and take top min_n
-                all_weights = weights.sort_values(ascending=False)
-                if len(all_weights) >= min_n:
-                    weights = all_weights.head(min_n)
-                else:
-                    weights = all_weights
-            
-            # Renormalize
-            weights = weights / weights.sum()
-            
+        """Replicate the monolith's pruning logic (threshold expressed in percent)."""
+        if weights.empty:
             return weights
-            
-        except Exception as e:
-            logger.error(f"Error enforcing min holdings: {e}")
-            raise
+        keep = weights[weights >= (prune_below_pct / 100.0)].sort_values(ascending=False)
+        if len(keep) >= min_n:
+            return keep / keep.sum()
+        top = weights.sort_values(ascending=False).head(min_n)
+        return top / top.sum()
     
     def optimize_portfolio(
         self,
-        tickers: List[str],
         prices: pd.DataFrame,
+        objective: str,
+        risk_free: float,
+        target_return: float,
+        max_weight: float,
+        l2_reg: float,
+        min_weight_threshold: float,
+        min_holdings: int,
         investment_amount: float,
-        risk_aversion: float = 1.0,
-        min_weight_threshold: float = 0.0025,
-        min_holdings: int = 3
     ) -> OptimizationResult:
-        """Optimize portfolio using PyPortfolioOpt"""
+        """Optimize portfolio using the same settings as the monolith app."""
+        if prices.empty or len(prices.columns) < 2:
+            raise HTTPException(status_code=400, detail="Insufficient price data for optimization")
+        
+        mu, S = self.compute_stats(prices)
+        n_assets = len(prices.columns)
+        if n_assets <= 3:
+            ef = EfficientFrontier(mu, S, weight_bounds=(0, 1))
+            l2_reg = 0
+        else:
+            ef = EfficientFrontier(mu, S, weight_bounds=(0, max_weight / 100.0))
+            if l2_reg and l2_reg > 0:
+                ef.add_objective(objective_functions.L2_reg, gamma=l2_reg)
         
         try:
-            # Ensure we have valid price data
-            if prices.empty:
-                raise ValueError("No price data provided")
-            
-            # Filter tickers to only those with data
-            available_tickers = [t for t in tickers if t in prices.columns]
-            if not available_tickers:
-                raise ValueError("None of the requested tickers have price data")
-            
-            prices_filtered = prices[available_tickers].dropna()
-            
-            if len(prices_filtered) < 10:
-                raise ValueError("Insufficient price data for optimization")
-            
-            # Compute expected returns and covariance
-            mu, S = self.compute_stats(prices_filtered)
-            
-            # Create efficient frontier
-            ef = EfficientFrontier(mu, S)
-            
-            # Add regularization for numerical stability
-            ef.add_constraint(lambda w: w >= 0.001)  # Minimum 0.1% weight
-            
-            # Optimize for maximum quadratic utility (risk-adjusted returns)
-            weights = ef.max_quadratic_utility(risk_aversion=risk_aversion)
-            
-            # Clean tiny weights and enforce minimum holdings
-            weights_series = pd.Series(weights)
-            weights_series = self.enforce_min_holdings(weights_series, min_holdings, min_weight_threshold)
-            
-            # Get portfolio performance
-            ef_clean = EfficientFrontier(mu, S)
-            ef_clean.set_weights(weights_series.to_dict())
-            performance = ef_clean.portfolio_performance(verbose=False)
-            
-            expected_annual_return, annual_volatility, sharpe_ratio = performance
-            
-            # Discrete allocation
-            latest_prices = get_latest_prices(prices_filtered)
-            da = DiscreteAllocation(weights_series.to_dict(), latest_prices, total_portfolio_value=investment_amount)
-            allocation, leftover = da.greedy_portfolio()
-            
-            return OptimizationResult(
-                weights={k: float(v) for k, v in weights_series.items()},
-                expected_annual_return=float(expected_annual_return),
-                annual_volatility=float(annual_volatility),
-                sharpe_ratio=float(sharpe_ratio),
-                allocation=allocation,
-                leftover_cash=float(leftover)
-            )
-            
-        except Exception as e:
-            logger.error(f"Portfolio optimization failed: {e}")
-            raise HTTPException(status_code=500, detail=f"Optimization failed: {str(e)}")
+            if objective == "Max Sharpe":
+                ef.max_sharpe(risk_free_rate=risk_free / 100.0)
+            elif objective == "Min Volatility (target return)":
+                ef.efficient_return(target_return=target_return / 100.0)
+            else:
+                ef.efficient_return(target_return=target_return / 100.0)
+        except Exception:
+            try:
+                ef.min_volatility()
+            except Exception as exc:
+                logger.error(f"Optimization failure: {exc}")
+                raise HTTPException(status_code=500, detail=f"Optimization failed: {exc}")
+        
+        raw_weights = pd.Series(ef.clean_weights(cutoff=0))
+        final_weights = self.enforce_min_holdings(raw_weights, min_holdings, min_weight_threshold)
+        if final_weights.empty:
+            raise HTTPException(status_code=400, detail="Optimization produced empty weights. Adjust constraints.")
+        
+        ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=risk_free / 100.0, verbose=False)
+        latest_prices = get_latest_prices(prices[final_weights.index])
+        da = DiscreteAllocation(final_weights.to_dict(), latest_prices, total_portfolio_value=investment_amount)
+        allocation, leftover = da.greedy_portfolio()
+        
+        return OptimizationResult(
+            weights={k: float(v) for k, v in final_weights.items()},
+            expected_annual_return=float(ret),
+            annual_volatility=float(vol),
+            sharpe_ratio=float(sharpe),
+            allocation=allocation,
+            leftover_cash=float(leftover)
+        )
     
     def calculate_portfolio_metrics(self, prices: pd.DataFrame, weights: Dict[str, float]) -> Dict:
         """Calculate various portfolio metrics given prices and weights"""
@@ -196,53 +173,39 @@ async def health_check():
     return {"status": "healthy", "service": "calculation_service"}
 
 @app.post("/optimize-portfolio")
-async def optimize_portfolio(payload: dict):
+async def optimize_portfolio(request: PortfolioOptimizationRequest):
     """Optimize portfolio allocation"""
     try:
-        # Extract parameters from payload
-        tickers = payload.get('tickers', [])
-        prices_data = payload.get('prices_data', {})
-        investment_amount = payload.get('investment_amount', 100000)
-        risk_aversion = payload.get('risk_aversion', 1.0)
-        min_weight_threshold = payload.get('min_weight_threshold', 0.0025)
-        min_holdings = payload.get('min_holdings', 3)
-        
-        if not tickers or not prices_data:
+        if not request.tickers or not request.prices_data:
             raise HTTPException(status_code=400, detail="Missing required parameters: tickers and prices_data")
         
-        # Convert prices data back to DataFrame
-        prices_df = pd.DataFrame.from_dict(prices_data, orient='index')
+        prices_df = pd.DataFrame.from_dict(request.prices_data, orient='index')
         prices_df.index = pd.to_datetime(prices_df.index)
-        
-        # Filter to only requested tickers
-        available_tickers = [t for t in tickers if t in prices_df.columns]
+        available_tickers = [t for t in request.tickers if t in prices_df.columns]
         if not available_tickers:
             raise HTTPException(status_code=400, detail="None of the requested tickers have price data")
+        prices_df = prices_df[available_tickers].dropna()
         
-        prices_df = prices_df[available_tickers]
-        
-        # Perform optimization
         result = calculation_service.optimize_portfolio(
-            available_tickers, 
-            prices_df, 
-            investment_amount, 
-            risk_aversion, 
-            min_weight_threshold, 
-            min_holdings
+            prices=prices_df,
+            objective=request.objective,
+            risk_free=request.risk_free,
+            target_return=request.target_return,
+            max_weight=request.max_weight,
+            l2_reg=request.l2_reg,
+            min_weight_threshold=request.min_weight_threshold,
+            min_holdings=request.min_holdings,
+            investment_amount=request.investment_amount
         )
         
         return ServiceResponse(
             success=True,
-            data={
-                'weights': result.weights,
-                'expected_annual_return': result.expected_annual_return,
-                'annual_volatility': result.annual_volatility,
-                'sharpe_ratio': result.sharpe_ratio,
-                'allocation': result.allocation,
-                'leftover_cash': result.leftover_cash
-            }
+            data=result.dict()
         )
         
+    except HTTPException as http_exc:
+        logger.error(f"Optimization request error: {http_exc.detail}")
+        raise http_exc
     except Exception as e:
         logger.error(f"Error in optimize_portfolio: {e}")
         return ServiceResponse(

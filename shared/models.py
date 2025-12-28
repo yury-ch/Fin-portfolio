@@ -6,7 +6,6 @@
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
 from datetime import datetime
-import pandas as pd
 
 class StockDataRequest(BaseModel):
     """Request model for stock data"""
@@ -24,31 +23,23 @@ class StockAnalysisRequest(BaseModel):
 class PortfolioOptimizationRequest(BaseModel):
     """Request model for portfolio optimization"""
     tickers: List[str]
-    period: str = "1y"
-    interval: str = "1d"
+    prices_data: Dict[str, Dict[str, float]]
     investment_amount: float
-    risk_aversion: float = 1.0
-    min_weight_threshold: float = 0.0025
+    objective: str = "Max Sharpe"
+    risk_free: float = 4.0
+    target_return: float = 10.0
+    max_weight: float = 30.0
+    l2_reg: float = 5.0
+    min_weight_threshold: float = 0.25  # percent
     min_holdings: int = 3
 
-class StockMetrics(BaseModel):
-    """Individual stock metrics"""
-    ticker: str
-    total_return_pct: float
-    volatility_pct: float
-    sharpe_ratio: float
-    max_drawdown_pct: float
-    composite_score: float
-    current_price: float
-    market_cap: Optional[float] = None
-    pe_ratio: Optional[float] = None
-    
 class AnalysisMetadata(BaseModel):
     """Metadata for cached analysis"""
     last_updated: datetime
     period: str
     num_stocks: int
     version: str
+    data_through: Optional[datetime] = None
 
 class CacheInfo(BaseModel):
     """Cache status information"""
@@ -58,6 +49,7 @@ class CacheInfo(BaseModel):
     is_stale: bool
     period: Optional[str] = None
     num_stocks: Optional[int] = None
+    periods: Optional[Dict[str, AnalysisMetadata]] = None
 
 class OptimizationResult(BaseModel):
     """Portfolio optimization result"""
@@ -74,3 +66,14 @@ class ServiceResponse(BaseModel):
     data: Optional[Any] = None
     error: Optional[str] = None
     timestamp: datetime = datetime.now()
+class StockMetrics(BaseModel):
+    """Individual stock metrics aligned with analyzer output"""
+    ticker: str
+    annual_return: float
+    volatility: float
+    sharpe_ratio: float
+    max_drawdown: float
+    recent_3m_return: float
+    composite_score: float
+    current_price: float
+    additional_fields: Optional[Dict[str, Any]] = None
