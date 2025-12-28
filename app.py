@@ -7,11 +7,14 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Optional
 import time
-import os
 from pathlib import Path
 from datetime import datetime, timedelta
+import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from streamlit.runtime.scriptrunner import get_script_run_ctx, RerunData
 
 import yfinance as yf
 from pypfopt import (
@@ -27,13 +30,24 @@ from pypfopt import (
 # Global Constants for Data Persistence
 # -------------------------------
 DATA_DIR = Path("sp500_data")
-ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"
-METADATA_FILE = DATA_DIR / "metadata.parquet"
+ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"  # legacy single-period cache
+METADATA_FILE = DATA_DIR / "metadata.parquet"        # legacy single-period metadata
+HIDDEN_ANALYSIS_COLUMNS = ['analysis_timestamp', 'analysis_period', 'data_through']
+ANALYSIS_PERIODS = ["1y", "2y", "3y"]
 
 st.set_page_config(page_title="S&P Portfolio Optimizer", layout="wide")
 
 st.title("📈 S&P 500 Portfolio Optimizer")
 st.caption("Build an optimal S&P portfolio given a risk–return preference, investment amount, and horizon.")
+
+if 'analysis_cache' not in st.session_state:
+    st.session_state['analysis_cache'] = {}
+if 'analysis_task' not in st.session_state:
+    st.session_state['analysis_task'] = None
+if 'analysis_executor' not in st.session_state:
+    st.session_state['analysis_executor'] = ThreadPoolExecutor(max_workers=1)
+if 'analysis_futures' not in st.session_state:
+    st.session_state['analysis_futures'] = {}
 
 # -------------------------------
 # Column mapping for backwards compatibility
@@ -115,127 +129,6 @@ DEFAULT_TICKERS = [
 # Investment horizon (needed for analysis period matching)
 horizon = st.sidebar.selectbox("Investment horizon / Lookback window", ["1y","2y","3y","5y"], index=0)
 
-# Stock selection options
-stock_selection = st.sidebar.radio(
-    "Stock Selection Method",
-    ["Manual Entry", "Use Top Performers from Analysis", "Custom from Analysis"],
-    help="Choose how to select stocks for optimization"
-)
-
-if stock_selection == "Manual Entry":
-    # Use recommended tickers if available
-    default_value = st.session_state.get('recommended_tickers', ",".join(DEFAULT_TICKERS))
-    
-    tickers_str = st.sidebar.text_area(
-        "Tickers (comma-separated)",
-        value=default_value,
-        help="Paste S&P tickers, e.g. AAPL,MSFT,NVDA. Tip: Yahoo uses BRK-B for Berkshire B. Use the S&P 500 Analyzer for recommendations!"
-    )
-    TICKERS: List[str] = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
-    
-    # Clear recommended tickers after first use
-    if 'recommended_tickers' in st.session_state and st.session_state.get('recommended_tickers') == tickers_str:
-        if st.sidebar.button("🔄 Clear Recommendations"):
-            del st.session_state['recommended_tickers']
-            st.rerun()
-
-elif stock_selection == "Use Top Performers from Analysis":
-    num_top_stocks = st.sidebar.slider("Number of top stocks", min_value=5, max_value=25, value=10, step=1)
-    
-    # Get top performers from analysis - inline logic to avoid scope issues
-    if ANALYSIS_FILE.exists() and METADATA_FILE.exists():
-        try:
-            cached_df = pd.read_parquet(ANALYSIS_FILE)
-            cached_df = standardize_analysis_columns(cached_df)  # Standardize column names
-            metadata_df = pd.read_parquet(METADATA_FILE)
-            metadata = metadata_df.iloc[0].to_dict()
-            
-            # Check staleness and period match
-            last_updated = metadata.get('last_updated')
-            if isinstance(last_updated, str):
-                last_updated = pd.to_datetime(last_updated)
-            
-            age = datetime.now() - last_updated
-            is_stale = age > timedelta(hours=24)
-            
-            cached_period = metadata.get('period', '')
-            
-            if not is_stale and cached_period == horizon:
-                top_performers = cached_df.head(num_top_stocks)['Ticker'].tolist()
-            else:
-                top_performers = []
-        except:
-            top_performers = []
-    else:
-        top_performers = []
-    
-    if top_performers:
-        st.sidebar.success(f"✅ Using top {len(top_performers)} stocks from analysis")
-        st.sidebar.caption(f"Top stocks: {', '.join(top_performers)}")
-        
-        # Display as comma-separated string like manual entry
-        tickers_str = ",".join(top_performers)
-        st.sidebar.text_area(
-            "Selected Tickers (from analysis)",
-            value=tickers_str,
-            disabled=True,
-            help="These are the top-performing stocks from your S&P 500 analysis"
-        )
-        TICKERS = top_performers
-    else:
-        st.sidebar.warning("⚠️ No analysis data available. Run S&P 500 analyzer first or switch to manual entry.")
-        TICKERS = DEFAULT_TICKERS
-
-else:  # Custom from Analysis
-    # Load analysis data and let user select - inline logic
-    if ANALYSIS_FILE.exists() and METADATA_FILE.exists():
-        try:
-            cached_df = pd.read_parquet(ANALYSIS_FILE)
-            cached_df = standardize_analysis_columns(cached_df)  # Standardize column names
-            metadata_df = pd.read_parquet(METADATA_FILE)
-            metadata = metadata_df.iloc[0].to_dict()
-            
-            # Check staleness and period match
-            last_updated = metadata.get('last_updated')
-            if isinstance(last_updated, str):
-                last_updated = pd.to_datetime(last_updated)
-            
-            age = datetime.now() - last_updated
-            is_stale = age > timedelta(hours=24)
-            
-            cached_period = metadata.get('period', '')
-            
-            if not is_stale and cached_period == horizon:
-                age_hours = age.total_seconds() / 3600
-                num_stocks = len(cached_df)
-                cache_info = f"Cached: {num_stocks} stocks, {cached_period} period, {age_hours:.1f}h ago"
-                
-                st.sidebar.success(f"📊 Analysis data available ({cache_info})")
-                
-                # Show top 20 for selection
-                top_20 = cached_df.head(20)
-                selected_tickers = st.sidebar.multiselect(
-                    "Select stocks from analysis (top 20 shown)",
-                    options=top_20['Ticker'].tolist(),
-                    default=top_20.head(10)['Ticker'].tolist(),
-                    help="Choose specific stocks from the analysis results"
-                )
-                
-                if selected_tickers:
-                    TICKERS = selected_tickers
-                else:
-                    st.sidebar.warning("⚠️ Please select at least 2 stocks")
-                    TICKERS = DEFAULT_TICKERS
-            else:
-                st.sidebar.warning(f"⚠️ Analysis period ({cached_period}) doesn't match optimization period ({horizon})")
-                TICKERS = DEFAULT_TICKERS
-        except:
-            st.sidebar.warning("⚠️ Error loading analysis data.")
-            TICKERS = DEFAULT_TICKERS
-    else:
-        st.sidebar.warning("⚠️ No analysis data. Run S&P 500 analyzer first.")
-        TICKERS = DEFAULT_TICKERS
-
 interval = st.sidebar.selectbox("Price frequency", ["1d","1wk","1mo"], index=0)
 
 objective = st.sidebar.selectbox(
@@ -264,44 +157,132 @@ def ensure_data_directory():
     """Create data directory if it doesn't exist"""
     DATA_DIR.mkdir(exist_ok=True)
 
-def save_analysis_data(df: pd.DataFrame, period: str):
-    """Save analysis results to parquet with metadata"""
+def analysis_file_path(period: Optional[str] = None) -> Path:
+    """Return the parquet path for a specific analysis period (or legacy default)."""
+    if period:
+        return DATA_DIR / f"sp500_analysis_{period}.parquet"
+    return ANALYSIS_FILE
+
+def metadata_file_path(period: Optional[str] = None) -> Path:
+    """Return the metadata parquet path for a specific analysis period (or legacy default)."""
+    if period:
+        return DATA_DIR / f"metadata_{period}.parquet"
+    return METADATA_FILE
+
+def save_analysis_data(df: pd.DataFrame, period: str, data_through: Optional[datetime] = None, announce: bool = True) -> dict:
+    """Save analysis results to a period-specific parquet with metadata."""
     ensure_data_directory()
     
-    # Add timestamp and period to the data
     df = df.copy()
-    df['analysis_timestamp'] = datetime.now()
+    analysis_ts = datetime.now()
+    df['analysis_timestamp'] = analysis_ts
     df['analysis_period'] = period
+    if data_through is not None:
+        df['data_through'] = data_through
     
-    # Save main analysis data
-    df.to_parquet(ANALYSIS_FILE, index=False)
+    data_path = analysis_file_path(period)
+    meta_path = metadata_file_path(period)
+    df.to_parquet(data_path, index=False)
     
-    # Save metadata
-    metadata = pd.DataFrame({
-        'last_updated': [datetime.now()],
-        'period': [period],
-        'num_stocks': [len(df)],
-        'version': ['1.0']
-    })
-    metadata.to_parquet(METADATA_FILE, index=False)
+    metadata = {
+        'last_updated': analysis_ts,
+        'period': period,
+        'num_stocks': len(df),
+        'version': '1.0',
+        'data_through': data_through
+    }
+    pd.DataFrame([metadata]).to_parquet(meta_path, index=False)
     
-    st.info(f"💾 Analysis data saved to {ANALYSIS_FILE}")
+    if announce:
+        st.info(f"💾 Analysis data saved ({period})")
+    
+    return metadata
 
-def load_analysis_data() -> Tuple[pd.DataFrame, dict]:
-    """Load analysis results from parquet if available"""
-    if not ANALYSIS_FILE.exists() or not METADATA_FILE.exists():
+def clean_analysis_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop internal metadata columns from cached dataframes."""
+    if df.empty:
+        return df
+    return df.drop(HIDDEN_ANALYSIS_COLUMNS, axis=1, errors='ignore')
+
+def format_timestamp(value) -> str:
+    """Format metadata timestamps for display."""
+    if value is None or value == "Unknown":
+        return "Unknown"
+    if isinstance(value, str):
+        try:
+            value = pd.to_datetime(value)
+        except Exception:
+            return value
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value)
+
+def _read_analysis_artifacts(data_path: Path, meta_path: Path, silent: bool = False) -> Tuple[pd.DataFrame, dict]:
+    if not data_path.exists() or not meta_path.exists():
         return pd.DataFrame(), {}
-    
     try:
-        # Load data
-        df = pd.read_parquet(ANALYSIS_FILE)
-        df = standardize_analysis_columns(df)  # Standardize column names
-        metadata = pd.read_parquet(METADATA_FILE).iloc[0].to_dict()
-        
-        return df, metadata
+        df = pd.read_parquet(data_path)
+        df = standardize_analysis_columns(df)
+        metadata = pd.read_parquet(meta_path).iloc[0].to_dict()
+        return clean_analysis_dataframe(df), metadata
     except Exception as e:
-        st.warning(f"Failed to load cached data: {e}")
+        if not silent:
+            st.warning(f"Failed to load cached data: {e}")
         return pd.DataFrame(), {}
+
+def load_analysis_data(period: Optional[str] = None, silent: bool = False) -> Tuple[pd.DataFrame, dict]:
+    """Load analysis results for a specific period (or legacy default)."""
+    data_path = analysis_file_path(period)
+    meta_path = metadata_file_path(period)
+    df, metadata = _read_analysis_artifacts(data_path, meta_path, silent)
+    if not df.empty or metadata:
+        return df, metadata
+    
+    # Fallback: legacy single-period cache if it matches the requested period
+    if period is not None:
+        legacy_df, legacy_meta = _read_analysis_artifacts(ANALYSIS_FILE, METADATA_FILE, silent=True)
+        if not legacy_df.empty and legacy_meta.get('period') == period:
+            return legacy_df, legacy_meta
+    return pd.DataFrame(), {}
+
+def get_cached_analysis(period: str) -> Tuple[pd.DataFrame, dict]:
+    """Return cached analysis for the given period, hydrating from disk if needed."""
+    cache = st.session_state.setdefault('analysis_cache', {})
+    entry = cache.get(period)
+    if entry:
+        return entry.get('df', pd.DataFrame()), entry.get('metadata', {})
+    
+    df, metadata = load_analysis_data(period, silent=True)
+    if not df.empty or metadata:
+        cache[period] = {
+            'df': df,
+            'metadata': metadata
+        }
+    return cache.get(period, {}).get('df', pd.DataFrame()), cache.get(period, {}).get('metadata', {})
+
+def hydrate_analysis_cache(periods: List[str]):
+    """Ensure session_state cache includes any persisted results for the given periods."""
+    for period in periods:
+        get_cached_analysis(period)
+
+def get_cache_info(periods: Optional[List[str]] = None) -> str:
+    """Return a compact summary of cached periods for display."""
+    cache = st.session_state.get('analysis_cache', {})
+    period_list = periods or sorted(cache.keys())
+    rows = []
+    for period in period_list:
+        metadata = cache.get(period, {}).get('metadata')
+        if not metadata:
+            continue
+        last_updated = format_timestamp(metadata.get('last_updated'))
+        num_stocks = metadata.get('num_stocks', '—')
+        rows.append(f"{period}: {num_stocks} stocks @ {last_updated}")
+    if rows:
+        return " | ".join(rows)
+    return "No cached data available"
+
+# Hydrate cached data for the default analyzer periods on startup
+hydrate_analysis_cache(ANALYSIS_PERIODS)
 
 def is_data_stale(metadata: dict, max_age_hours: int = 24) -> bool:
     """Check if cached data is stale (older than max_age_hours)"""
@@ -319,91 +300,50 @@ def is_data_stale(metadata: dict, max_age_hours: int = 24) -> bool:
     age = datetime.now() - last_updated
     return age > timedelta(hours=max_age_hours)
 
-def get_cache_info() -> str:
-    """Get human-readable cache information"""
-    df, metadata = load_analysis_data()
-    
-    if df.empty:
-        return "No cached data available"
-    
-    last_updated = metadata.get('last_updated', 'Unknown')
-    if isinstance(last_updated, str):
-        last_updated = pd.to_datetime(last_updated)
-    
-    age_hours = (datetime.now() - last_updated).total_seconds() / 3600
-    period = metadata.get('period', 'Unknown')
-    num_stocks = len(df)
-    
-    return f"Cached: {num_stocks} stocks, {period} period, {age_hours:.1f}h ago"
-
 
 # -------------------------------
 # S&P 500 Analysis Functions
 # -------------------------------
-def analyze_sp500_stocks(tickers: List[str], period: str = "1y", force_refresh: bool = False) -> pd.DataFrame:
-    """
-    Analyze S&P 500 stocks and score them based on multiple metrics:
-    - Return (annualized)
-    - Volatility (lower is better)
-    - Sharpe ratio
-    - Maximum drawdown (lower is better)
-    - Recent momentum (3-month return)
-    
-    Uses cached data if available and not stale (< 24 hours old)
-    """
-    
-    # Check for cached data first (unless force refresh)
-    if not force_refresh:
-        cached_df, metadata = load_analysis_data()
-        
-        if not cached_df.empty and not is_data_stale(metadata):
-            # Check if period matches
-            cached_period = metadata.get('period', '')
-            if cached_period == period:
-                st.success(f"📱 Using cached data ({get_cache_info()})")
-                return cached_df.drop(['analysis_timestamp', 'analysis_period'], axis=1, errors='ignore')
-    
-    # Perform fresh analysis
-    st.info("🔄 Performing fresh analysis...")
+def compute_sp500_analysis(tickers: List[str], period: str = "1y") -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
+    """Compute S&P 500 analysis metrics without touching the UI."""
     results = []
+    latest_data_timestamp: Optional[pd.Timestamp] = None
     
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    for i, ticker in enumerate(tickers):
+    for ticker in tickers:
         try:
-            status_text.text(f"Analyzing {ticker}... ({i+1}/{len(tickers)})")
-            
-            # Get price data
             data = yf.download(ticker, period=period, interval="1d", progress=False)
             if data.empty:
                 continue
-                
+            
             prices = data['Adj Close'] if 'Adj Close' in data.columns else data['Close']
             returns = prices.pct_change().dropna()
-            
-            if len(returns) < 60:  # Need at least 60 days
+            if len(returns) < 60:
                 continue
             
-            # Calculate metrics
-            ann_return = float((1 + returns.mean()) ** 252 - 1)
+            daily_log = np.log(prices).diff().dropna()
+            if daily_log.empty:
+                continue
+            mean_log = daily_log.mean()
+            ann_return = float(np.exp(mean_log * 252) - 1)
             ann_vol = float(returns.std() * np.sqrt(252))
             sharpe = float(ann_return / ann_vol if ann_vol > 0 else 0)
             
-            # Maximum drawdown
             cumulative = (1 + returns).cumprod()
             rolling_max = cumulative.expanding().max()
             drawdown = (cumulative - rolling_max) / rolling_max
             max_drawdown = float(drawdown.min())
             
-            # 3-month momentum (recent performance)
             if len(prices) >= 63:
                 recent_return = float((prices.iloc[-1] / prices.iloc[-63]) - 1)
             else:
                 recent_return = 0.0
             
-            # Current price info
             current_price = float(prices.iloc[-1])
+            
+            data_end = prices.index.max()
+            if isinstance(data_end, pd.Timestamp):
+                if latest_data_timestamp is None or data_end > latest_data_timestamp:
+                    latest_data_timestamp = data_end
             
             results.append({
                 'Ticker': ticker,
@@ -414,24 +354,16 @@ def analyze_sp500_stocks(tickers: List[str], period: str = "1y", force_refresh: 
                 'Recent_3M_Return': recent_return,
                 'Current_Price': current_price
             })
-            
-        except Exception as e:
-            st.warning(f"Failed to analyze {ticker}: {str(e)}")
+        except Exception:
             continue
-            
-        progress_bar.progress((i + 1) / len(tickers))
-        time.sleep(0.2)  # Increased rate limiting for larger dataset
-    
-    progress_bar.empty()
-    status_text.empty()
+        
+        time.sleep(0.2)
     
     if not results:
-        return pd.DataFrame()
-        
+        return pd.DataFrame(), latest_data_timestamp
+    
     df = pd.DataFrame(results)
     
-    # Calculate composite score (higher is better)
-    # Normalize metrics to 0-1 scale (handle division by zero)
     def safe_normalize(series, inverse=False):
         range_val = series.max() - series.min()
         if range_val == 0:
@@ -440,27 +372,109 @@ def analyze_sp500_stocks(tickers: List[str], period: str = "1y", force_refresh: 
         return 1 - normalized if inverse else normalized
     
     df['Return_Score'] = safe_normalize(df['Annual_Return'])
-    df['Vol_Score'] = safe_normalize(df['Volatility'], inverse=True)  # Lower vol is better
+    df['Vol_Score'] = safe_normalize(df['Volatility'], inverse=True)
     df['Sharpe_Score'] = safe_normalize(df['Sharpe_Ratio'])
-    df['Drawdown_Score'] = safe_normalize(df['Max_Drawdown'], inverse=True)  # Lower drawdown is better
+    df['Drawdown_Score'] = safe_normalize(df['Max_Drawdown'], inverse=True)
     df['Momentum_Score'] = safe_normalize(df['Recent_3M_Return'])
     
-    # Composite score (weighted average)
     df['Composite_Score'] = (
-        0.25 * df['Return_Score'] + 
-        0.20 * df['Vol_Score'] + 
-        0.25 * df['Sharpe_Score'] + 
-        0.15 * df['Drawdown_Score'] + 
+        0.25 * df['Return_Score'] +
+        0.20 * df['Vol_Score'] +
+        0.25 * df['Sharpe_Score'] +
+        0.15 * df['Drawdown_Score'] +
         0.15 * df['Momentum_Score']
     )
     
-    # Sort by composite score
     df = df.sort_values('Composite_Score', ascending=False)
+    return df, latest_data_timestamp
+
+def run_analysis_job(period: str, force_refresh: bool = False, tickers: Optional[List[str]] = None) -> Tuple[pd.DataFrame, dict]:
+    """Execute analysis, respecting cache rules, suitable for background threads."""
+    tickers = tickers or SP500_SAMPLE
+    cached_df, metadata = load_analysis_data(period, silent=True)
+    if not force_refresh and not cached_df.empty:
+        cached_period = metadata.get('period', '')
+        if cached_period == period and not is_data_stale(metadata):
+            return cached_df, metadata
     
-    # Save to parquet for future use
-    save_analysis_data(df, period)
+    df, latest_data_timestamp = compute_sp500_analysis(tickers, period)
+    if df.empty:
+        return pd.DataFrame(), {}
     
+    metadata = save_analysis_data(df, period, data_through=latest_data_timestamp, announce=False)
+    cleaned_df = clean_analysis_dataframe(df)
+    return cleaned_df, metadata
+
+def analyze_sp500_stocks(tickers: List[str], period: str = "1y", force_refresh: bool = False) -> pd.DataFrame:
+    """Synchronous compatibility wrapper."""
+    df, _ = run_analysis_job(period, force_refresh, tickers)
     return df
+
+def launch_async_analysis(period: str, force_refresh: bool = False):
+    """Start an asynchronous analysis task if one is not already running."""
+    if st.session_state.get('analysis_task'):
+        return
+    task_id = str(uuid.uuid4())
+    future = st.session_state['analysis_executor'].submit(run_analysis_job, period, force_refresh)
+    st.session_state['analysis_futures'][task_id] = future
+    st.session_state['analysis_task'] = {
+        'id': task_id,
+        'period': period,
+        'force_refresh': force_refresh,
+        'started_at': datetime.now()
+    }
+    schedule_rerun_on_completion(future)
+
+def poll_analysis_task():
+    """Check background task status and update session state when complete."""
+    task = st.session_state.get('analysis_task')
+    if not task:
+        return
+    future = st.session_state['analysis_futures'].get(task['id'])
+    if future is None:
+        st.session_state.pop('analysis_task', None)
+        return
+    if future.done():
+        try:
+            df, metadata = future.result()
+            if df is not None and not df.empty:
+                period_key = metadata.get('period', task['period'])
+                cache = st.session_state.setdefault('analysis_cache', {})
+                cache[period_key] = {
+                    'df': clean_analysis_dataframe(df),
+                    'metadata': metadata or {}
+                }
+        except Exception as exc:
+            st.session_state['analysis_error'] = str(exc)
+        finally:
+            st.session_state['analysis_futures'].pop(task['id'], None)
+            st.session_state.pop('analysis_task', None)
+            st.experimental_rerun()
+
+def schedule_rerun_on_completion(future):
+    """Request a Streamlit rerun when the background analysis finishes."""
+    ctx = get_script_run_ctx(suppress_warning=True)
+    if ctx is None:
+        return
+    script_requests = getattr(ctx, "script_requests", None)
+    if script_requests is None:
+        return
+    rerun_data = RerunData(
+        query_string=getattr(ctx, "query_string", ""),
+        page_script_hash=getattr(ctx, "page_script_hash", ""),
+        cached_message_hashes=set(getattr(ctx, "cached_message_hashes", set())),
+        context_info=getattr(ctx, "context_info", None),
+    )
+
+    def _notify():
+        try:
+            future.result()
+        except Exception:
+            pass
+        finally:
+            script_requests.request_rerun(rerun_data)
+
+    threading.Thread(target=_notify, daemon=True).start()
 
 # -------------------------------
 # Price loader (robust + cached)
@@ -648,19 +662,25 @@ def enforce_min_holdings(weights: pd.Series, min_n: int, prune_below_pct: float)
 # -------------------------------
 tab1, tab2 = st.tabs(["📊 Portfolio Optimizer", "🔍 S&P 500 Stock Analyzer"])
 
+poll_analysis_task()
+
 with tab2:
     st.header("🔍 S&P 500 Stock Analyzer")
-    st.caption("Analyze top 100 S&P 500 stocks and get top 10 recommendations based on multiple performance metrics.")
+    st.caption("Analyze top 100 S&P 500 stocks and get top 20 recommendations based on multiple performance metrics.")
     
-    # Show cache status
-    cache_info = get_cache_info()
+    analysis_cache = st.session_state.get('analysis_cache', {})
+    analysis_task = st.session_state.get('analysis_task')
+    analysis_error = st.session_state.pop('analysis_error', None)
+    
+    period_options = ANALYSIS_PERIODS
+    cache_info = get_cache_info(period_options)
     if cache_info != "No cached data available":
         st.info(f"💾 {cache_info}")
     
     col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
-        analysis_period = st.selectbox("Analysis period", ["1y", "2y", "3y"], index=0, key="analysis_period")
+        analysis_period = st.selectbox("Analysis period", period_options, index=0, key="analysis_period")
     
     with col2:
         analyze_button = st.button("🚀 Analyze Stocks", type="primary")
@@ -668,47 +688,62 @@ with tab2:
     with col3:
         force_refresh = st.button("🔄 Force Refresh", help="Ignore cached data and perform fresh analysis")
     
-    # Always try to show cached results first
-    show_results = False
-    analysis_results = pd.DataFrame()
-    
-    # Load cached data and display if available
-    cached_df, metadata = load_analysis_data()
-    if not cached_df.empty:
-        analysis_results = cached_df.drop(['analysis_timestamp', 'analysis_period'], axis=1, errors='ignore')
-        show_results = True
-        
-        if not (analyze_button or force_refresh):
-            st.success(f"📱 Showing cached analysis results ({get_cache_info()})")
-    
-    if analyze_button or force_refresh:
-        # Determine spinner message based on whether we're using cache
-        if force_refresh:
-            spinner_msg = "🔄 Force refreshing analysis... This will take 5-7 minutes."
+    if analyze_button:
+        if analysis_task:
+            st.warning("Analysis already running. Please wait for it to finish.")
         else:
-            cached_df, metadata = load_analysis_data()
-            if not cached_df.empty and not is_data_stale(metadata) and metadata.get('period') == analysis_period:
-                spinner_msg = "📱 Loading cached analysis..."
-            else:
-                spinner_msg = "🔄 Analyzing 100 S&P 500 stocks... This will take 5-7 minutes."
-        
-        with st.spinner(spinner_msg):
-            analysis_results = analyze_sp500_stocks(SP500_SAMPLE, analysis_period, force_refresh=force_refresh)
-            show_results = True
-            
-        if not analysis_results.empty:
-            st.success(f"✅ Analyzed {len(analysis_results)} stocks successfully!")
+            launch_async_analysis(analysis_period, force_refresh=False)
+            st.info("📡 Analysis started... you can continue using the dashboard.")
     
-    # Display results if available (either cached or freshly analyzed)
-    if show_results and not analysis_results.empty:
-        # Top 10 recommendations
-        top_10 = analysis_results.head(10)
+    if force_refresh:
+        if analysis_task:
+            st.warning("Analysis already running. Please wait for it to finish.")
+        else:
+            launch_async_analysis(analysis_period, force_refresh=True)
+            st.info("♻️ Force refresh started... existing cache will be replaced.")
+    
+    if analysis_task:
+        started_at = analysis_task['started_at']
+        elapsed = datetime.now() - started_at
+        minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
+        st.info(f"⏳ Analysis in progress (started {started_at.strftime('%H:%M:%S')} | elapsed {minutes}m {seconds}s)")
+    
+    if analysis_error:
+        st.error(f"Analysis failed: {analysis_error}")
+    
+    status_rows = []
+    for period in period_options:
+        meta = analysis_cache.get(period, {}).get('metadata')
+        if meta:
+            status_rows.append({
+                'Period': period,
+                'Last Analysis': format_timestamp(meta.get('last_updated')),
+                'Prices Through': format_timestamp(meta.get('data_through')),
+                'Stocks': meta.get('num_stocks', '—')
+            })
+        else:
+            status_rows.append({
+                'Period': period,
+                'Last Analysis': 'Not run',
+                'Prices Through': '—',
+                'Stocks': '—'
+            })
+    status_df = pd.DataFrame(status_rows).set_index('Period')
+    st.table(status_df)
+
+    analysis_results, analysis_metadata = get_cached_analysis(analysis_period)
+    
+    if not analysis_results.empty:
+        # Top 20 recommendations
+        top_20 = analysis_results.head(20)
             
-        st.subheader("🏆 Top 10 Stock Recommendations")
+        st.subheader("🏆 Top 20 Stock Recommendations")
         st.caption("Based on composite score (Return + Sharpe Ratio + Low Volatility + Low Drawdown + Recent Momentum)")
+        if analysis_metadata:
+            st.caption(f"Last analysis: {format_timestamp(analysis_metadata.get('last_updated'))} | Prices through: {format_timestamp(analysis_metadata.get('data_through'))}")
             
         display_cols = ['Ticker', 'Annual_Return', 'Sharpe_Ratio', 'Volatility', 'Max_Drawdown', 'Recent_3M_Return', 'Current_Price', 'Composite_Score']
-        display_df = top_10[display_cols].copy()
+        display_df = top_20[display_cols].copy()
         
         # Format percentages and numbers
         display_df['Annual_Return'] = (display_df['Annual_Return'] * 100).round(2).astype(str) + '%'
@@ -727,10 +762,10 @@ with tab2:
         # Quick use button
         col1, col2 = st.columns([2, 1])
         with col1:
-            if st.button("📈 Use Top 10 for Portfolio Optimization", key="use_top10"):
-                top_10_tickers = ",".join(top_10['Ticker'].tolist())
-                st.session_state['recommended_tickers'] = top_10_tickers
-                st.success("✅ Top 10 stocks copied! Go to Portfolio Optimizer tab.")
+            if st.button("📈 Use Top 20 for Portfolio Optimization", key="use_top20"):
+                top_20_tickers = ",".join(top_20['Ticker'].tolist())
+                st.session_state['recommended_tickers'] = top_20_tickers
+                st.success("✅ Top 20 stocks copied! Go to Portfolio Optimizer tab.")
         
         # Download button
         with col2:
@@ -747,47 +782,43 @@ with tab2:
             st.caption("Manage cached analysis data")
             
             col1, col2 = st.columns(2)
+            data_path = analysis_file_path(analysis_period)
+            meta_path = metadata_file_path(analysis_period)
             with col1:
-                if st.button("🗑️ Clear Cache", help="Delete all cached analysis data"):
+                if st.button("🗑️ Clear Cache", help="Delete cached analysis data for this period"):
                     try:
-                        if ANALYSIS_FILE.exists():
-                            ANALYSIS_FILE.unlink()
+                        removed = False
+                        for path in {data_path, meta_path}:
+                            if path.exists():
+                                path.unlink()
+                                removed = True
+                        # Remove legacy cache if it represents the same period
                         if METADATA_FILE.exists():
-                            METADATA_FILE.unlink()
-                        st.success("✅ Cache cleared successfully!")
-                        st.rerun()
+                            try:
+                                legacy_meta = pd.read_parquet(METADATA_FILE).iloc[0].to_dict()
+                            except Exception:
+                                legacy_meta = {}
+                            if legacy_meta.get('period') == analysis_period:
+                                for path in {ANALYSIS_FILE, METADATA_FILE}:
+                                    if path.exists():
+                                        path.unlink()
+                                        removed = True
+                        st.session_state['analysis_cache'].pop(analysis_period, None)
+                        if removed:
+                            st.success(f"✅ Cache cleared for {analysis_period}!")
+                        else:
+                            st.info("ℹ️ No cached files found for this period.")
+                        st.experimental_rerun()
                     except Exception as e:
                         st.error(f"❌ Failed to clear cache: {e}")
             
             with col2:
-                # Show file info
-                if ANALYSIS_FILE.exists():
-                    file_size = ANALYSIS_FILE.stat().st_size / 1024  # KB
+                if data_path.exists():
+                    file_size = data_path.stat().st_size / 1024  # KB
                     st.metric("Cache Size", f"{file_size:.1f} KB")
                 else:
                     st.metric("Cache Size", "0 KB")
-        
-        # Analysis summary
-        st.subheader("📈 Analysis Summary")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            avg_return = top_10['Annual_Return'].mean()
-            st.metric("Avg Return (Top 10)", f"{avg_return:.1%}")
-        
-        with col2:
-            avg_sharpe = top_10['Sharpe_Ratio'].mean()
-            st.metric("Avg Sharpe Ratio", f"{avg_sharpe:.2f}")
-        
-        with col3:
-            avg_vol = top_10['Volatility'].mean()
-            st.metric("Avg Volatility", f"{avg_vol:.1%}")
-        
-        with col4:
-            total_analyzed = len(analysis_results)
-            st.metric("Stocks Analyzed", f"{total_analyzed}")
-    
-    elif not show_results:
+    else:
         st.info("🔍 No analysis data available. Click 'Analyze Stocks' to start analyzing S&P 500 stocks.")
 
 # -------------------------------
@@ -795,33 +826,109 @@ with tab2:
 # -------------------------------
 with tab1:
     # -------------------------------
-    # Stock Selection Display (only for Custom from Analysis)
+    # Stock Selection Controls (Optimizer only)
     # -------------------------------
-    if stock_selection == "Custom from Analysis":
-        st.info(f"🎯 **Stock Selection**: {stock_selection} ({len(TICKERS)} stocks)")
+    st.subheader("Stock Selection Method")
+    custom_analysis_df: Optional[pd.DataFrame] = None
+    stock_selection = st.radio(
+        "Choose how to feed tickers into the optimizer",
+        ["Manual Entry", "Use Top Performers from Analysis", "Custom from Analysis"],
+        horizontal=True
+    )
+    
+    if stock_selection == "Manual Entry":
+        default_value = st.session_state.get('recommended_tickers', ",".join(DEFAULT_TICKERS))
+        tickers_str = st.text_area(
+            "Tickers (comma-separated)",
+            value=default_value,
+            help="Paste S&P tickers, e.g. AAPL,MSFT,NVDA. Tip: Yahoo uses BRK-B for Berkshire B. Use the analyzer for quick recommendations."
+        )
+        TICKERS = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
         
-        # Show analysis scores if available
-        if ANALYSIS_FILE.exists():
-            try:
-                cached_df = pd.read_parquet(ANALYSIS_FILE)
-                cached_df = standardize_analysis_columns(cached_df)  # Standardize column names
-                # Filter to show only selected stocks
-                selected_analysis = cached_df[cached_df['Ticker'].isin(TICKERS)].copy()
-                if not selected_analysis.empty:
-                    with st.expander("📊 Selected Stocks Analysis Scores", expanded=False):
-                        display_cols = ['Ticker', 'Annual_Return', 'Sharpe_Ratio', 'Volatility', 'Composite_Score']
-                        display_df = selected_analysis[display_cols].copy()
-                        
-                        # Format for display
-                        display_df['Annual_Return'] = (display_df['Annual_Return'] * 100).round(2).astype(str) + '%'
-                        display_df['Sharpe_Ratio'] = display_df['Sharpe_Ratio'].round(2)
-                        display_df['Volatility'] = (display_df['Volatility'] * 100).round(2).astype(str) + '%'
-                        display_df['Composite_Score'] = display_df['Composite_Score'].round(3)
-                        
-                        display_df.columns = ['Ticker', 'Ann. Return', 'Sharpe', 'Volatility', 'Score']
-                        st.dataframe(display_df, use_container_width=True)
-            except:
-                pass  # Silently ignore errors in display
+        if 'recommended_tickers' in st.session_state and st.session_state.get('recommended_tickers') == tickers_str:
+            if st.button("🔄 Clear Recommendations", key="clear_recs"):
+                del st.session_state['recommended_tickers']
+                st.experimental_rerun()
+    
+    elif stock_selection == "Use Top Performers from Analysis":
+        num_top_stocks = st.slider("Number of top stocks", min_value=5, max_value=25, value=10, step=1)
+        
+        cached_df, metadata = get_cached_analysis(horizon)
+        top_performers: List[str] = []
+        if not cached_df.empty:
+            top_performers = cached_df.head(num_top_stocks)['Ticker'].tolist()
+        
+        if top_performers:
+            last_run = format_timestamp(metadata.get('last_updated')) if metadata else "Unknown"
+            if metadata and not is_data_stale(metadata):
+                st.success(f"✅ Using cached analysis from {last_run}")
+            else:
+                st.warning(f"⚠️ Using cached analysis last run {last_run}. Consider refreshing for the latest data.")
+            st.caption(f"Top stocks: {', '.join(top_performers)}")
+            TICKERS = top_performers
+            st.session_state['recommended_tickers'] = ",".join(top_performers)
+        else:
+            st.warning("⚠️ No analysis data available for this horizon. Run S&P 500 analyzer first or switch to manual entry.")
+            fallback = st.session_state.get('recommended_tickers')
+            if fallback:
+                TICKERS = [t.strip() for t in fallback.split(",") if t.strip()]
+            else:
+                TICKERS = DEFAULT_TICKERS
+    
+    else:  # Custom from Analysis
+        cached_df, metadata = get_cached_analysis(horizon)
+        custom_analysis_df = cached_df
+        if not cached_df.empty:
+            last_updated = metadata.get('last_updated')
+            if isinstance(last_updated, str):
+                last_updated = pd.to_datetime(last_updated)
+            age_hours = None
+            if isinstance(last_updated, datetime):
+                age_hours = max((datetime.now() - last_updated).total_seconds() / 3600, 0)
+            num_stocks = len(cached_df)
+            timestamp_label = format_timestamp(last_updated) if last_updated else "Unknown"
+            age_snippet = f" ({age_hours:.1f}h ago)" if age_hours is not None else ""
+            st.success(f"📊 Analysis cache: {num_stocks} stocks, last run {timestamp_label}{age_snippet}")
+            
+            top_20 = cached_df.head(20)
+            default_choices = top_20.head(min(10, len(top_20)))['Ticker'].tolist()
+            selected_tickers = st.multiselect(
+                "Select stocks from analysis (top 20 shown)",
+                options=top_20['Ticker'].tolist(),
+                default=default_choices,
+                help="Choose specific stocks from the analysis results"
+            )
+            
+            if selected_tickers:
+                TICKERS = selected_tickers
+                st.session_state['recommended_tickers'] = ",".join(selected_tickers)
+            else:
+                st.warning("⚠️ Please select at least 2 stocks")
+                TICKERS = default_choices or DEFAULT_TICKERS
+        else:
+            st.warning("⚠️ No analysis data. Run S&P 500 analyzer first.")
+            fallback = st.session_state.get('recommended_tickers')
+            TICKERS = [t.strip() for t in fallback.split(",")] if fallback else DEFAULT_TICKERS
+    
+    if not TICKERS:
+        st.warning("No tickers provided. Falling back to default recommendations.")
+        TICKERS = DEFAULT_TICKERS
+    st.info(f"Optimizing with {len(TICKERS)} tickers.")
+    
+    if stock_selection == "Custom from Analysis" and custom_analysis_df is not None:
+        selected_analysis = custom_analysis_df[custom_analysis_df['Ticker'].isin(TICKERS)].copy()
+        if not selected_analysis.empty:
+            with st.expander("📊 Selected Stocks Analysis Scores", expanded=False):
+                display_cols = ['Ticker', 'Annual_Return', 'Sharpe_Ratio', 'Volatility', 'Composite_Score']
+                display_df = selected_analysis[display_cols].copy()
+                
+                display_df['Annual_Return'] = (display_df['Annual_Return'] * 100).round(2).astype(str) + '%'
+                display_df['Sharpe_Ratio'] = display_df['Sharpe_Ratio'].round(2)
+                display_df['Volatility'] = (display_df['Volatility'] * 100).round(2).astype(str) + '%'
+                display_df['Composite_Score'] = display_df['Composite_Score'].round(3)
+                
+                display_df.columns = ['Ticker', 'Ann. Return', 'Sharpe', 'Volatility', 'Score']
+                st.dataframe(display_df, use_container_width=True)
 
     # -------------------------------
     # Run Portfolio Optimization

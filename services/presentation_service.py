@@ -111,14 +111,16 @@ class ServiceClient:
             if response.status_code == 200:
                 data = response.json()
                 if data.get('success'):
-                    records = data.get('data', [])
-                    if records:
-                        # Convert to DataFrame - records are already in correct format
-                        df = pd.DataFrame(records)
+                    raw_payload = data.get('data', {})
+                    if raw_payload:
+                        # API returns a dict keyed by date -> {ticker: price}
+                        if isinstance(raw_payload, dict):
+                            df = pd.DataFrame.from_dict(raw_payload, orient='index')
+                        else:
+                            df = pd.DataFrame(raw_payload)
                         if not df.empty:
-                            # Create a simple date index for the data
-                            df.index = pd.date_range(end=pd.Timestamp.now().date(), periods=len(df), freq='D')
-                            # Ensure numeric data types
+                            df.index = pd.to_datetime(df.index)
+                            df.sort_index(inplace=True)
                             df = df.astype(float)
                         return df
             return None

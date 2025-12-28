@@ -4,7 +4,15 @@
       "Bash(pkill:*)",
       "Bash(python:*)",
       "Bash(git add:*)",
-      "Bash(./run-monolith.sh:*)"
+      "Bash(./run-monolith.sh:*)",
+      "Bash(pip install:*)",
+      "Bash(./run-microservices.sh:*)",
+      "Bash(lsof:*)",
+      "Bash(kill:*)",
+      "Bash(awk:*)",
+      "Bash(xargs kill:*)",
+      "Bash(curl:*)",
+      "Bash(source:*)"
     ],
     "deny": [],
     "ask": []
