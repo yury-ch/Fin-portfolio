@@ -26,10 +26,12 @@ from pypfopt import (
     get_latest_prices,
 )
 
+from shared.ticker_provider import DEFAULT_SP500_SAMPLE
+
 # -------------------------------
 # Global Constants for Data Persistence
 # -------------------------------
-DATA_DIR = Path("sp500_data")
+DATA_DIR = Path(__file__).resolve().parent / "sp500_data"
 ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"  # legacy single-period cache
 METADATA_FILE = DATA_DIR / "metadata.parquet"        # legacy single-period metadata
 HIDDEN_ANALYSIS_COLUMNS = ['analysis_timestamp', 'analysis_period', 'data_through']
@@ -105,22 +107,7 @@ def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
 st.sidebar.header("Inputs")
 
 # S&P 500 Top 100 stocks by market cap for comprehensive analysis
-SP500_SAMPLE = [
-    # Top 50 (Mega caps)
-    "AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META","BRK-B","UNH","XOM",
-    "JPM","JNJ","V","PG","HD","CVX","MA","ABBV","PFE","KO",
-    "AVGO","COST","PEP","TMO","WMT","MRK","DIS","ADBE","NFLX","CRM",
-    "BAC","ACN","LLY","ORCL","WFC","VZ","CMCSA","CSCO","ABT","DHR",
-    "NKE","TXN","PM","BMY","UNP","QCOM","RTX","HON","INTC","T",
-    
-    # Next 50 (Large caps) 
-    "AMAT","SPGI","CAT","INTU","ISRG","NOW","LOW","GS","MS","AMD",
-    "AMGN","BKNG","TJX","BLK","AXP","SYK","VRTX","PLD","GILD","MDLZ",
-    "SBUX","TMUS","CVS","CI","LRCX","CB","MO","PYPL","MMC","SO",
-    "ZTS","SCHW","FIS","DUK","BSX","CL","ITW","EQIX","AON","CSX",
-    "ADI","NOC","MU","SHW","ICE","KLAC","APD","USB","CME","REGN",
-    "EMR","PNC","EOG","FCX","GD","NSC","TGT","HUM","COP","PSA"
-]
+SP500_SAMPLE = list(DEFAULT_SP500_SAMPLE)
 
 DEFAULT_TICKERS = [
     "AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META","BRK-B","JPM","V"
@@ -155,7 +142,7 @@ st.sidebar.caption("Tip: For 5–10y analysis, use monthly data to reduce noise.
 
 def ensure_data_directory():
     """Create data directory if it doesn't exist"""
-    DATA_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 def analysis_file_path(period: Optional[str] = None) -> Path:
     """Return the parquet path for a specific analysis period (or legacy default)."""

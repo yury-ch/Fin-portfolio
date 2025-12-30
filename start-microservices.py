@@ -24,6 +24,16 @@ def main():
     services = []
     
     try:
+        # Start Ticker Service (port 8000)
+        ticker_service = start_service(
+            "Ticker Service",
+            "services/ticker_service.py",
+            8000
+        )
+        services.append(("Ticker Service", ticker_service))
+        
+        time.sleep(2)
+        
         # Start Data Service (port 8001)
         data_service = start_service(
             "Data Service", 
@@ -45,6 +55,7 @@ def main():
         time.sleep(2)
         
         print("\n🚀 Microservices started!")
+        print("🎯 Ticker Service: http://localhost:8000/docs")
         print("📊 Data Service: http://localhost:8001/docs")
         print("🔢 Calculation Service: http://localhost:8002/docs")
         print("\nTo start the presentation layer:")

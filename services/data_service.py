@@ -23,35 +23,21 @@ from shared.models import (
     StockDataRequest, StockAnalysisRequest, ServiceResponse,
     AnalysisMetadata, CacheInfo
 )
+from shared.ticker_provider import WikipediaTickerProvider, DEFAULT_SP500_SAMPLE
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Constants
-DATA_DIR = Path("sp500_data")
+DATA_DIR = Path(__file__).resolve().parents[1] / "sp500_data"
 ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"  # legacy single cache
 METADATA_FILE = DATA_DIR / "metadata.parquet"
 HIDDEN_ANALYSIS_COLUMNS = ['analysis_timestamp', 'analysis_period', 'data_through']
 ANALYSIS_PERIODS = ["1y", "2y", "3y"]
 
 # S&P 500 Top 100 stocks
-SP500_SAMPLE = [
-    # Top 50 (Mega caps)
-    "AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META","BRK-B","UNH","XOM",
-    "JPM","JNJ","V","PG","HD","CVX","MA","ABBV","PFE","KO",
-    "AVGO","COST","PEP","TMO","WMT","MRK","DIS","ADBE","NFLX","CRM",
-    "BAC","ACN","LLY","ORCL","WFC","VZ","CMCSA","CSCO","ABT","DHR",
-    "NKE","TXN","PM","BMY","UNP","QCOM","RTX","HON","INTC","T",
-    
-    # Next 50 (Large caps) 
-    "AMAT","SPGI","CAT","INTU","ISRG","NOW","LOW","GS","MS","AMD",
-    "AMGN","BKNG","TJX","BLK","AXP","SYK","VRTX","PLD","GILD","MDLZ",
-    "SBUX","TMUS","CVS","CI","LRCX","CB","MO","PYPL","MMC","SO",
-    "ZTS","SCHW","FIS","DUK","BSX","CL","ITW","EQIX","AON","CSX",
-    "ADI","NOC","MU","SHW","ICE","KLAC","APD","USB","CME","REGN",
-    "EMR","PNC","EOG","FCX","GD","NSC","TGT","HUM","COP","PSA"
-]
+SP500_SAMPLE = list(DEFAULT_SP500_SAMPLE)
 
 def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Align cached data with the expected analyzer schema."""
@@ -84,9 +70,10 @@ class DataService:
     
     def __init__(self):
         self.ensure_data_directory()
+        self.ticker_provider = WikipediaTickerProvider(fallback=SP500_SAMPLE)
     
     def ensure_data_directory(self):
-        DATA_DIR.mkdir(exist_ok=True)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
     
     def analysis_file_path(self, period: Optional[str] = None) -> Path:
         if period:
@@ -102,6 +89,10 @@ class DataService:
         if df is None or df.empty:
             return df
         return df.drop(HIDDEN_ANALYSIS_COLUMNS, axis=1, errors='ignore')
+    
+    def get_sp500_universe(self) -> List[str]:
+        tickers = self.ticker_provider.get_constituents()
+        return tickers if tickers else SP500_SAMPLE
     
     def save_analysis_data(self, df: pd.DataFrame, period: str, data_through: Optional[datetime] = None) -> dict:
         """Persist analysis results and metadata for a specific period."""
@@ -245,8 +236,11 @@ class DataService:
         df = df.sort_values('Composite_Score', ascending=False).reset_index(drop=True)
         return df, latest_data_timestamp
     
-    def analyze_sp500_stocks(self, tickers: List[str], period: str = "1y", force_refresh: bool = False) -> Tuple[pd.DataFrame, dict]:
+    def analyze_sp500_stocks(self, tickers: Optional[List[str]] = None, period: str = "1y", force_refresh: bool = False) -> Tuple[pd.DataFrame, dict]:
         """Analyze S&P 500 stocks with caching that mirrors the monolith behavior."""
+        tickers = tickers or self.get_sp500_universe()
+        if not tickers:
+            raise HTTPException(status_code=500, detail="No tickers available for analysis.")
         if not force_refresh:
             cached_df, metadata = self.get_cached_analysis(period)
             if cached_df is not None and metadata is not None and not self.is_data_stale(metadata):
@@ -497,8 +491,9 @@ async def get_stock_data(request: StockDataRequest):
 async def get_sp500_analysis(request: StockAnalysisRequest):
     """Get S&P 500 stock analysis"""
     try:
+        tickers = request.tickers or data_service.get_sp500_universe()
         analysis_df, metadata = data_service.analyze_sp500_stocks(
-            request.tickers, 
+            tickers, 
             request.period, 
             request.force_refresh
         )
@@ -544,10 +539,8 @@ async def clear_cache(period: Optional[str] = Query(default=None, description="P
 @app.get("/sp500-tickers")
 async def get_sp500_tickers():
     """Get list of S&P 500 sample tickers"""
-    return ServiceResponse(
-        success=True,
-        data=SP500_SAMPLE
-    )
+    tickers = data_service.get_sp500_universe()
+    return ServiceResponse(success=True, data=tickers)
 
 if __name__ == "__main__":
     import uvicorn

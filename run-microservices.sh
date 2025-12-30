@@ -29,6 +29,9 @@ fi
 cleanup() {
     echo ""
     echo "🛑 Shutting down services..."
+    if [ ! -z "$TICKER_PID" ]; then
+        kill $TICKER_PID 2>/dev/null
+    fi
     if [ ! -z "$DATA_PID" ]; then
         kill $DATA_PID 2>/dev/null
     fi
@@ -48,6 +51,12 @@ trap cleanup SIGINT SIGTERM
 echo ""
 echo "🔧 Starting backend services..."
 
+# Start Ticker Service
+echo "🎯 Starting Ticker Service (port 8000)..."
+python services/ticker_service.py &
+TICKER_PID=$!
+sleep 3
+
 # Start Data Service
 echo "📊 Starting Data Service (port 8001)..."
 python services/data_service.py &
@@ -61,7 +70,7 @@ CALC_PID=$!
 sleep 3
 
 # Check if backend services are running
-if ! kill -0 $DATA_PID 2>/dev/null || ! kill -0 $CALC_PID 2>/dev/null; then
+if ! kill -0 $TICKER_PID 2>/dev/null || ! kill -0 $DATA_PID 2>/dev/null || ! kill -0 $CALC_PID 2>/dev/null; then
     echo "❌ Failed to start backend services"
     cleanup
 fi
@@ -72,6 +81,7 @@ echo "🌐 Starting Presentation Service..."
 echo ""
 echo "📍 Access points:"
 echo "   • Web UI: http://localhost:8501"
+echo "   • Ticker Service API: http://localhost:8000/docs"
 echo "   • Data Service API: http://localhost:8001/docs"
 echo "   • Calculation Service API: http://localhost:8002/docs"
 echo ""

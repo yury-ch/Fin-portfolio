@@ -4,7 +4,19 @@ This document describes the refactored microservices architecture for the S&P 50
 
 ## Architecture Overview
 
-The application has been decomposed into three main services:
+The application has been decomposed into four services:
+
+### 0. Ticker Service (`services/ticker_service.py`)
+- **Port:** 8000
+- **Responsibilities:**
+  - Download the official Wikipedia S&P 500 constituents table
+  - Persist cached tickers under `sp500_data/sp500_constituents.csv` (legacy Nasdaq cache auto-detected)
+  - Provide diagnostics and manual refresh endpoints
+- **Endpoints:**
+  - `GET /health` - Health check and cache metadata
+  - `GET /sp500-tickers` - Return cached or freshly downloaded tickers
+  - `POST /refresh` - Force an immediate download
+- **API Documentation:** http://localhost:8000/docs
 
 ### 1. Data Service (`services/data_service.py`)
 - **Port:** 8001
@@ -58,6 +70,7 @@ python start-microservices.py
 ```
 
 This will start:
+- Ticker Service on http://localhost:8000
 - Data Service on http://localhost:8001
 - Calculation Service on http://localhost:8002
 
@@ -69,6 +82,7 @@ streamlit run services/presentation_service.py
 
 ### 4. Access the Application
 - **Web UI:** http://localhost:8501
+- **Ticker Service API:** http://localhost:8000/docs
 - **Data Service API:** http://localhost:8001/docs
 - **Calculation Service API:** http://localhost:8002/docs
 
