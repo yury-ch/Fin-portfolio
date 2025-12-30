@@ -235,7 +235,8 @@ def get_analysis(period: str, force_refresh: bool = False) -> Tuple[pd.DataFrame
 
 with tab2:
     st.header("🔍 S&P 500 Stock Analyzer")
-    st.caption("Analyze top 100 S&P 500 stocks via the data microservice.")
+    universe_size = len(st.session_state['sp500_tickers'])
+    st.caption(f"Analyze the full S&P 500 universe ({universe_size} tickers) via the data microservice.")
     refresh_cache_summary()
 
     period_options = ANALYSIS_PERIODS

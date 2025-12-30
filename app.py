@@ -4,6 +4,7 @@
 # Streamlit + yfinance + PyPortfolioOpt
 # -------------------------------
 
+import logging
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -26,7 +27,7 @@ from pypfopt import (
     get_latest_prices,
 )
 
-from shared.ticker_provider import DEFAULT_SP500_SAMPLE
+from shared.ticker_provider import DEFAULT_SP500_SAMPLE, WikipediaTickerProvider
 
 # -------------------------------
 # Global Constants for Data Persistence
@@ -106,8 +107,25 @@ def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
 # -------------------------------
 st.sidebar.header("Inputs")
 
-# S&P 500 Top 100 stocks by market cap for comprehensive analysis
-SP500_SAMPLE = list(DEFAULT_SP500_SAMPLE)
+# Shared ticker provider keeps the universe aligned with microservices
+logger = logging.getLogger(__name__)
+_ticker_provider = WikipediaTickerProvider(fallback=list(DEFAULT_SP500_SAMPLE))
+_sp500_universe_cache: List[str] = []
+
+
+def get_sp500_universe(force_refresh: bool = False) -> List[str]:
+    """Return the full S&P 500 universe, refreshing from Wikipedia when needed."""
+    global _sp500_universe_cache
+    if force_refresh or not _sp500_universe_cache:
+        try:
+            tickers = _ticker_provider.get_constituents(force_refresh=force_refresh)
+            if len(tickers) < 200:
+                raise ValueError(f"Only received {len(tickers)} tickers from provider")
+            _sp500_universe_cache = tickers
+        except Exception as exc:
+            logger.warning("Falling back to built-in S&P sample: %s", exc)
+            _sp500_universe_cache = list(DEFAULT_SP500_SAMPLE)
+    return _sp500_universe_cache
 
 DEFAULT_TICKERS = [
     "AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META","BRK-B","JPM","V"
@@ -377,7 +395,7 @@ def compute_sp500_analysis(tickers: List[str], period: str = "1y") -> Tuple[pd.D
 
 def run_analysis_job(period: str, force_refresh: bool = False, tickers: Optional[List[str]] = None) -> Tuple[pd.DataFrame, dict]:
     """Execute analysis, respecting cache rules, suitable for background threads."""
-    tickers = tickers or SP500_SAMPLE
+    tickers = tickers or get_sp500_universe()
     cached_df, metadata = load_analysis_data(period, silent=True)
     if not force_refresh and not cached_df.empty:
         cached_period = metadata.get('period', '')
@@ -653,7 +671,11 @@ poll_analysis_task()
 
 with tab2:
     st.header("🔍 S&P 500 Stock Analyzer")
-    st.caption("Analyze top 100 S&P 500 stocks and get top 20 recommendations based on multiple performance metrics.")
+    sp500_universe = get_sp500_universe()
+    st.caption(f"Analyze the full S&P 500 universe ({len(sp500_universe)} tickers) and surface the top recommendations based on multi-factor scoring.")
+    if st.button("🔁 Refresh S&P 500 universe", key="refresh_universe"):
+        sp500_universe = get_sp500_universe(force_refresh=True)
+        st.success(f"🔄 Reloaded {len(sp500_universe)} tickers from Wikipedia.")
     
     analysis_cache = st.session_state.get('analysis_cache', {})
     analysis_task = st.session_state.get('analysis_task')
@@ -719,6 +741,15 @@ with tab2:
     st.table(status_df)
 
     analysis_results, analysis_metadata = get_cached_analysis(analysis_period)
+    universe_size = len(sp500_universe)
+    if analysis_metadata:
+        analyzed_count = analysis_metadata.get('num_stocks', 0) or 0
+        metadata_stamp = format_timestamp(analysis_metadata.get('last_updated'))
+        if analyzed_count and analyzed_count < universe_size and not analysis_task:
+            st.warning(
+                f"Cached analysis ({metadata_stamp}) only covers {analyzed_count} of {universe_size} tickers. "
+                "Run 'Analyze Stocks' to refresh the full universe."
+            )
     
     if not analysis_results.empty:
         # Top 20 recommendations
@@ -728,6 +759,7 @@ with tab2:
         st.caption("Based on composite score (Return + Sharpe Ratio + Low Volatility + Low Drawdown + Recent Momentum)")
         if analysis_metadata:
             st.caption(f"Last analysis: {format_timestamp(analysis_metadata.get('last_updated'))} | Prices through: {format_timestamp(analysis_metadata.get('data_through'))}")
+        st.caption(f"Showing top {len(top_20)} of {len(analysis_results)} analyzed tickers.")
             
         display_cols = ['Ticker', 'Annual_Return', 'Sharpe_Ratio', 'Volatility', 'Max_Drawdown', 'Recent_3M_Return', 'Current_Price', 'Composite_Score']
         display_df = top_20[display_cols].copy()
@@ -806,7 +838,7 @@ with tab2:
                 else:
                     st.metric("Cache Size", "0 KB")
     else:
-        st.info("🔍 No analysis data available. Click 'Analyze Stocks' to start analyzing S&P 500 stocks.")
+        st.info("🔍 No analysis data available. Click 'Analyze Stocks' to process the entire S&P 500 universe.")
 
 # -------------------------------
 # Portfolio Optimizer Tab
