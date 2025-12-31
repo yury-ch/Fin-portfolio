@@ -196,24 +196,6 @@ if not st.session_state['sp500_tickers']:
     fetched = client.get_sp500_tickers()
     st.session_state['sp500_tickers'] = fetched if fetched else DEFAULT_TICKERS
 
-st.sidebar.header("Inputs")
-horizon = st.sidebar.selectbox("Investment horizon / Lookback window", ["1y", "2y", "3y", "5y"], index=0)
-interval = st.sidebar.selectbox("Price frequency", ["1d", "1wk", "1mo"], index=0)
-objective = st.sidebar.selectbox(
-    "Optimization objective",
-    ["Max Sharpe", "Min Volatility (target return)", "Target Return"],
-    index=0
-)
-risk_free = st.sidebar.number_input("Risk-free rate (annual, %)", value=4.0, step=0.25)
-target_return = st.sidebar.number_input("Target annual return (%)", value=10.0, step=0.5)
-max_weight = st.sidebar.slider("Max weight per stock (%)", min_value=5, max_value=50, value=30, step=1)
-l2_reg = st.sidebar.slider("L2 regularization (weight smoothing)", 0.0, 20.0, 5.0)
-min_weight_threshold = st.sidebar.slider("Prune weights below (%)", 0.0, 2.0, 0.25, 0.05)
-min_holdings = st.sidebar.number_input("Minimum number of holdings", min_value=2, max_value=60, value=3, step=1)
-investment = st.sidebar.number_input("Total investment (USD)", value=250_000, step=10_000)
-st.sidebar.markdown("---")
-st.sidebar.caption("Tip: For 5–10y analysis, use monthly data to reduce noise.")
-
 tab1, tab2 = st.tabs(["📊 Portfolio Optimizer", "🔍 S&P 500 Stock Analyzer"])
 
 
@@ -320,56 +302,148 @@ with tab2:
 
 
 with tab1:
-    st.subheader("Stock Selection Method")
-    stock_selection = st.radio(
-        "Choose how to feed tickers into the optimizer",
-        ["Manual Entry", "Use Top Performers from Analysis", "Custom from Analysis"],
-        horizontal=True
-    )
+    st.header("📊 Portfolio Optimizer")
+    st.caption("Adjust settings, choose a universe, and let the services build an allocation for you.")
+    selection_container = st.container()
+    analysis_container = st.container()
+    constraint_container = st.container()
 
-    tickers: List[str] = []
-    custom_analysis_df: Optional[pd.DataFrame] = None
-
-    if stock_selection == "Manual Entry":
-        default_value = st.session_state.get('recommended_tickers', ",".join(DEFAULT_TICKERS))
-        tickers_str = st.text_area("Tickers (comma-separated)", value=default_value)
-        tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
-        if st.button("🔄 Clear Recommendations"):
-            st.session_state['recommended_tickers'] = ",".join(DEFAULT_TICKERS)
-            st.experimental_rerun()
-    elif stock_selection == "Use Top Performers from Analysis":
-        num_top_stocks = st.slider("Number of top stocks", min_value=5, max_value=25, value=10, step=1)
-        cached_df, metadata = get_analysis(horizon, force_refresh=False)
-        if cached_df is not None and not cached_df.empty:
-            tickers = cached_df.head(num_top_stocks)['Ticker'].tolist()
-            if metadata:
-                freshness = format_timestamp(metadata.get("last_updated"))
-                st.success(f"Using cached analysis from {freshness}.")
-            st.session_state['recommended_tickers'] = ",".join(tickers)
-        else:
-            st.warning("No cached analysis available for this horizon. Falling back to defaults.")
-            tickers = DEFAULT_TICKERS
-    else:
-        custom_analysis_df, _ = get_analysis(horizon, force_refresh=False)
-        if custom_analysis_df is not None and not custom_analysis_df.empty:
-            options = custom_analysis_df['Ticker'].tolist()
-            default_choices = options[: min(10, len(options))]
-            selected = st.multiselect(
-                "Select stocks from analysis (top 20 shown)",
-                options=options[:20],
-                default=default_choices
+    with analysis_container:
+        st.subheader("Analysis Settings")
+        settings_col1, settings_col2, settings_col3 = st.columns(3)
+        with settings_col1:
+            horizon = st.selectbox(
+                "Analysis period / lookback",
+                ["1y", "2y", "3y", "5y"],
+                index=0,
+                key="micro_horizon"
             )
-            tickers = selected if selected else default_choices
-            st.session_state['recommended_tickers'] = ",".join(tickers)
+            interval = st.selectbox(
+                "Price frequency",
+                ["1d", "1wk", "1mo"],
+                index=0,
+                key="micro_interval"
+            )
+        with settings_col2:
+            objective = st.selectbox(
+                "Optimization objective",
+                ["Max Sharpe", "Min Volatility (target return)", "Target Return"],
+                index=0,
+                key="micro_objective"
+            )
+            target_return = st.number_input(
+                "Target annual return (%)",
+                value=10.0,
+                step=0.5,
+                key="micro_target_return"
+            )
+        with settings_col3:
+            risk_free = st.number_input(
+                "Risk-free rate (annual, %)",
+                value=4.0,
+                step=0.25,
+                key="micro_risk_free"
+            )
+            investment = st.number_input(
+                "Total investment (USD)",
+                value=250_000,
+                step=10_000,
+                key="micro_investment"
+            )
+        st.caption("Tip: Monthly data is usually smoother for 5–10 year horizons.")
+
+    with constraint_container:
+        st.subheader("Portfolio Constraints")
+        constraint_cols = st.columns(4)
+        with constraint_cols[0]:
+            max_weight = st.slider(
+                "Max weight per stock (%)",
+                min_value=5,
+                max_value=50,
+                value=30,
+                step=1,
+                key="micro_max_weight"
+            )
+        with constraint_cols[1]:
+            l2_reg = st.slider(
+                "L2 regularization",
+                min_value=0.0,
+                max_value=20.0,
+                value=5.0,
+                step=0.5,
+                key="micro_l2_reg"
+            )
+        with constraint_cols[2]:
+            min_weight_threshold = st.slider(
+                "Prune weights below (%)",
+                min_value=0.0,
+                max_value=2.0,
+                value=0.25,
+                step=0.05,
+                key="micro_min_weight_threshold"
+            )
+        with constraint_cols[3]:
+            min_holdings = st.number_input(
+                "Minimum holdings",
+                min_value=2,
+                max_value=60,
+                value=3,
+                step=1,
+                key="micro_min_holdings"
+            )
+
+    with selection_container:
+        st.subheader("Stock Selection Method")
+        stock_selection = st.radio(
+            "Choose how to feed tickers into the optimizer",
+            ["Manual Entry", "Use Top Performers from Analysis", "Custom from Analysis"],
+            horizontal=True
+        )
+
+        tickers: List[str] = []
+        custom_analysis_df: Optional[pd.DataFrame] = None
+
+        if stock_selection == "Manual Entry":
+            default_value = st.session_state.get('recommended_tickers', ",".join(DEFAULT_TICKERS))
+            tickers_str = st.text_area("Tickers (comma-separated)", value=default_value)
+            tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
+            if st.button("🔄 Clear Recommendations"):
+                st.session_state['recommended_tickers'] = ",".join(DEFAULT_TICKERS)
+                st.experimental_rerun()
+        elif stock_selection == "Use Top Performers from Analysis":
+            num_top_stocks = st.slider("Number of top stocks", min_value=5, max_value=25, value=10, step=1)
+            cached_df, metadata = get_analysis(horizon, force_refresh=False)
+            if cached_df is not None and not cached_df.empty:
+                tickers = cached_df.head(num_top_stocks)['Ticker'].tolist()
+                if metadata:
+                    freshness = format_timestamp(metadata.get("last_updated"))
+                    st.success(f"Using cached analysis from {freshness}.")
+                st.session_state['recommended_tickers'] = ",".join(tickers)
+            else:
+                st.warning("No cached analysis available for this horizon. Falling back to defaults.")
+                tickers = DEFAULT_TICKERS
         else:
-            st.warning("Analysis data unavailable; reverting to defaults.")
+            custom_analysis_df, _ = get_analysis(horizon, force_refresh=False)
+            if custom_analysis_df is not None and not custom_analysis_df.empty:
+                options = custom_analysis_df['Ticker'].tolist()
+                default_choices = options[: min(10, len(options))]
+                selected = st.multiselect(
+                    "Select stocks from analysis (top 20 shown)",
+                    options=options[:20],
+                    default=default_choices
+                )
+                tickers = selected if selected else default_choices
+                st.session_state['recommended_tickers'] = ",".join(tickers)
+            else:
+                st.warning("Analysis data unavailable; reverting to defaults.")
+                tickers = DEFAULT_TICKERS
+
+        if not tickers:
+            st.warning("No tickers provided. Using defaults.")
             tickers = DEFAULT_TICKERS
 
-    if not tickers:
-        st.warning("No tickers provided. Using defaults.")
-        tickers = DEFAULT_TICKERS
-
-    st.info(f"Optimizing with {len(tickers)} tickers.")
+        st.info(f"Optimizing with {len(tickers)} tickers.")
+        st.markdown("---")
 
     prices_df = client.get_stock_data(tickers, horizon, interval)
     if prices_df.empty:
