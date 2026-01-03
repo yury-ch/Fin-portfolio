@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+sp500_data/price_cache/

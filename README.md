@@ -25,6 +25,12 @@ streamlit run app.py
 4) Start UI  
 `streamlit run services/presentation_service.py`
 
+5) Warm Yahoo price cache (async loader)  
+`./run-price-sync.sh` — ideal for cron every Monday 23:00 CET so API calls serve from parquet.
+
+6) Refresh analysis cache right after price sync  
+`./run-analysis-sync.sh` — computes `sp500_analysis_<period>.parquet` so the UI serves precomputed metrics only.
+
 **Docker (all services)**
 
 1) Build the image  

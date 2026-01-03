@@ -1,0 +1,56 @@
+<mxfile host="app.diagrams.net" modified="2024-06-22T00:00:00.000Z" agent="5.0 (Codex)" version="24.5.2">
+  <diagram id="E6bQKOSeHBZ4o6D3Dy6S" name="DataServiceFlow">
+    <mxGraphModel dx="1209" dy="704" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" value="Presentation Service&#xa;(Streamlit UI)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="200" width="190" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="3" value="Data Service&#xa;(FastAPI 8001)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="300" y="200" width="190" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="4" value="Calculation Service&#xa;(FastAPI 8002)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="560" y="200" width="190" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="5" value="Ticker Service&#xa;(FastAPI 8000)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="300" y="60" width="190" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="6" value="Wikipedia / CSV Cache&#xa;(sp500_constituents.csv)" style="shape=process;rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="560" y="60" width="190" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="7" value="Parquet Cache&#xa;(sp500_analysis_*.parquet + metadata)" style="shape=folder;tabWidth=40;tabHeight=14;tabPosition=left;tabColor=#d5e8d4;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="300" y="340" width="210" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="8" value="Yahoo Finance API&#xa;(yfinance)" style="shape=process;rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="560" y="340" width="190" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="9" value="HTTP: get analysis / stock data" style="endArrow=block;html=1;fontSize=11;strokeColor=#6c8ebf;" edge="1" parent="1" source="2" target="3">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="210" y="240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="10" value="HTTP: optimized weights&#xa;(prices forwarded from UI)" style="endArrow=block;html=1;fontSize=11;strokeColor=#d79b00;" edge="1" parent="1" source="2" target="4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="11" value="Shared WikipediaTickerProvider&#xa;+ cached CSV metadata" style="dashed=1;endArrow=open;html=1;fontSize=11;strokeColor=#b85450;" edge="1" parent="1" source="3" target="5">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="395" y="160" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="12" value="GET /sp500-tickers&#xa;POST /refresh (ops)" style="endArrow=block;html=1;fontSize=11;strokeColor=#d6b656;" edge="1" parent="1" source="5" target="6" />
+        <mxCell id="13" value="Read + Write&#xa;analysis + metadata" style="endArrow=block;html=1;fontSize=11;strokeColor=#666666;" edge="1" parent="1" source="3" target="7" />
+        <mxCell id="14" value="Download batched prices&#xa;/ compute analysis inputs" style="endArrow=block;html=1;fontSize=11;strokeColor=#9673a6;" edge="1" parent="1" source="3" target="8" />
+        <mxCell id="15" value="UI sends tickers, period, constraints&#xa;Receives tables + cache metadata" style="fontSize=11;strokeColor=none;fillColor=none;html=1;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="40" y="150" width="210" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="16" value="Analysis cache served via /sp500-analysis&#xa;Price matrix served via /stock-data" style="fontSize=11;strokeColor=none;fillColor=none;html=1;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="300" y="300" width="210" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="17" value="No direct call from Data → Calculation;&#xa;Presentation sends cleaned price matrix." style="fontSize=11;strokeColor=none;fillColor=none;html=1;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="520" y="150" width="240" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

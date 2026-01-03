@@ -189,13 +189,21 @@ def load_prices(tickers: List[str], period: str, interval: str) -> pd.DataFrame:
 - **Pattern**: Write-through cache with TTL
 - **Reason**: Expensive computation (5-7 minutes)
 - **Trade-off**: Disk space vs. computation time
-- **Invalidation**: Time-based (24 hours) + manual force refresh
+- **Producer**: `services/analysis_sync_service.py` (invoked via `run-analysis-sync.sh` after `run-price-sync.sh`)
+- **Invalidation**: Weekly refresh (7-day TTL aligned with the price cache)
 
 ### 2. **Price Data: Session Cache**  
 - **Pattern**: Memory-only with parameter-based keys
 - **Reason**: Fast API calls but rate-limited
 - **Trade-off**: Memory usage vs. API calls
 - **Invalidation**: Session end or parameter change
+
+### 3. **Yahoo Price Cache: Parquet Sync**
+- **Pattern**: Weekly producer/consumer cache (`sp500_data/price_cache/prices_<period>_<interval>.parquet`)
+- **Reason**: Pre-fetch expensive Yahoo downloads asynchronously so user traffic never blocks
+- **Trade-off**: Disk footprint (~few MB) vs. guaranteed fast reads
+- **Invalidation**: TTL of 7 days; refreshed by `services/price_sync_service.py` every Monday 23:00 CET via `./run-price-sync.sh`
+- **Consumers**: `DataService.load_prices` (returns cached DataFrames before touching Yahoo)
 
 ### 3. **User Selections: Session State**
 - **Pattern**: Temporary key-value store
@@ -285,8 +293,8 @@ schedule.every().day.at("06:00").do(refresh_analysis_cache)
 - **Consistency**: Verify period alignment across cache files
 
 ### 2. **Data Freshness**
-- **Analysis Data**: 24-hour TTL with manual override
-- **Price Data**: Always fresh from Yahoo Finance
+- **Analysis Data**: 7-day TTL, refreshed via `run-analysis-sync.sh` right after the weekly price sync
+- **Price Data**: Weekly parquet refresh (Monday 23:00 CET) served from `price_cache`, fallback to live Yahoo if stale
 - **Metadata**: Updated with each analysis run
 
 ### 3. **Error Handling**

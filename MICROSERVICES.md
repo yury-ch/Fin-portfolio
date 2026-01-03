@@ -57,6 +57,27 @@ The application has been decomposed into four services:
   - Real-time communication with backend services
   - Comprehensive portfolio analysis UI
 
+### 4. Price Sync Service (`services/price_sync_service.py`)
+- **Type:** CLI worker (run via cron/shell)
+- **Responsibilities:**
+  - Download Yahoo Finance price history for the S&P universe
+  - Persist parquet caches under `sp500_data/price_cache/`
+  - Refresh the cached data asynchronously so the UI never blocks on Yahoo calls
+- **Execution:**
+  - Run manually with `./run-price-sync.sh`
+  - Schedule via cron every Monday 23:00 CET (see instructions below)
+- **Configuration:** Periods/intervals are configurable via CLI flags; defaults mirror the analyzer horizons (`1y`, `2y`, `3y` at `1d` interval).
+
+### 5. Analysis Sync Service (`services/analysis_sync_service.py`)
+- **Type:** CLI worker (run via cron/shell)
+- **Responsibilities:**
+  - Read cached Yahoo prices and compute derived metrics (return, volatility, Sharpe, drawdown, etc.)
+  - Persist `sp500_analysis_<period>.parquet` + metadata so the web app only serves precomputed data
+- **Execution:**
+  - Run manually with `./run-analysis-sync.sh`
+  - Trigger right after every price sync (same cron entry or via `run-price-sync.sh && run-analysis-sync.sh`)
+- **Notes:** The data service no longer performs on-demand analysis; if the cache is stale/missing it instructs operators to rerun the analysis sync.
+
 ## Quick Start
 
 ### 1. Install Dependencies
@@ -85,6 +106,25 @@ streamlit run services/presentation_service.py
 - **Ticker Service API:** http://localhost:8000/docs
 - **Data Service API:** http://localhost:8001/docs
 - **Calculation Service API:** http://localhost:8002/docs
+
+## Scheduled Price Sync
+
+Run `./run-price-sync.sh` once per week to warm the Yahoo parquet cache. The recommended cron entry (using Central European Time) is:
+
+```
+CRON_TZ=Europe/Berlin
+0 23 * * 1 /path/to/repo/run-price-sync.sh >> /var/log/price_sync.log 2>&1
+5 23 * * 1 /path/to/repo/run-analysis-sync.sh >> /var/log/analysis_sync.log 2>&1
+```
+
+Or, to guarantee analysis immediately after price loading, chain them in a single entry:
+
+```
+CRON_TZ=Europe/Berlin
+0 23 * * 1 /path/to/repo/run-price-sync.sh && /path/to/repo/run-analysis-sync.sh >> /var/log/weekly_sync.log 2>&1
+```
+
+This keeps both caches fresh every Monday at 23:00 CET/CEST. Adjust the path/log destination as needed and pass `--force-refresh-tickers` to either script when you need a fresh universe download.
 
 ## Manual Service Startup
 
