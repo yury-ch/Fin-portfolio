@@ -38,3 +38,13 @@ def test_price_cache_stale_detection(tmp_path):
     reloaded = PriceCacheManager(cache_dir=tmp_path)
     cached, _ = reloaded.load_prices(["AAPL"], "1y", "1d", max_age_hours=24)
     assert cached is None
+
+
+def test_trim_history(tmp_path):
+    manager = PriceCacheManager(cache_dir=tmp_path)
+    end = pd.Timestamp.utcnow().tz_localize(None).normalize()
+    idx = pd.date_range(end=end, periods=800, freq="D")
+    df = pd.DataFrame({"AAPL": range(len(idx))}, index=idx)
+    trimmed = manager.trim_history(df, "1y")
+    assert len(trimmed) > 10
+    assert (trimmed.index.max() - trimmed.index.min()).days <= 370

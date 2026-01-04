@@ -203,6 +203,7 @@ def load_prices(tickers: List[str], period: str, interval: str) -> pd.DataFrame:
 - **Reason**: Pre-fetch expensive Yahoo downloads asynchronously so user traffic never blocks
 - **Trade-off**: Disk footprint (~few MB) vs. guaranteed fast reads
 - **Invalidation**: TTL of 7 days; refreshed by `services/price_sync_service.py` every Monday 23:00 CET via `./run-price-sync.sh`
+- **Incremental Behavior**: First run backfills 5 years; future runs append only delta bars since the last timestamp
 - **Consumers**: `DataService.load_prices` (returns cached DataFrames before touching Yahoo)
 
 ### 3. **User Selections: Session State**

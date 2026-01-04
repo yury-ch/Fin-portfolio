@@ -7,17 +7,19 @@ import os
 import sys
 from typing import List, Sequence
 
+import pandas as pd
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.analysis_engine import AnalysisEngine
-from shared.price_loader import PriceCacheManager
+from shared.price_loader import MASTER_PERIOD, PriceCacheManager
 from shared.ticker_provider import DEFAULT_SP500_SAMPLE, WikipediaTickerProvider
 from services.data_service import DataService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("analysis_sync_service")
 
-DEFAULT_PERIODS = ["1y", "2y", "3y"]
+DEFAULT_PERIODS = ["1y", "2y", "3y", "5y"]
 
 
 class AnalysisSyncService:
@@ -46,21 +48,24 @@ class AnalysisSyncService:
             tickers = list(DEFAULT_SP500_SAMPLE)
         return tickers
 
+    def _load_slice(self, tickers: List[str], period: str) -> pd.DataFrame:
+        master_df, _ = self.price_cache.load_full(MASTER_PERIOD, self.interval)
+        if master_df is None or master_df.empty:
+            raise RuntimeError(f"No master price cache available. Run price sync for {MASTER_PERIOD}.")
+        available = list(master_df.columns)
+        missing = len(set(tickers) - set(available))
+        if missing > 0:
+            logger.warning("Master price cache missing %d tickers for analysis slice %s", missing, period)
+        slice_df = self.price_cache.trim_history(master_df[tickers], period)
+        if slice_df.empty:
+            raise RuntimeError(f"No data in master cache for {period}. Ensure price sync covered this window.")
+        return slice_df
+
     def _analyze_period(self, tickers: List[str], period: str):
-        logger.info("Starting analysis for %s/%s", period, self.interval)
-        price_frame, _ = self.price_cache.load_prices(
-            tickers,
-            period,
-            self.interval,
-            max_age_hours=None,
-        )
+        logger.info("Starting analysis for %s/%s from master %s", period, self.interval, MASTER_PERIOD)
+        price_frame = self._load_slice(tickers, period)
         if price_frame is None or price_frame.empty:
             raise RuntimeError(f"No cached prices available for {period}/{self.interval}. Run price sync first.")
-
-        available = list(price_frame.columns)
-        missing = max(0, len(tickers) - len(available))
-        if missing > 0:
-            logger.warning("Price cache missing %d tickers for %s/%s", missing, period, self.interval)
 
         df, latest_ts = self.analysis_engine.analyze_prices(price_frame)
         if df.empty:

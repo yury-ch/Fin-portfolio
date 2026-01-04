@@ -60,8 +60,8 @@ The application has been decomposed into four services:
 ### 4. Price Sync Service (`services/price_sync_service.py`)
 - **Type:** CLI worker (run via cron/shell)
 - **Responsibilities:**
-  - Download Yahoo Finance price history for the S&P universe
-  - Persist parquet caches under `sp500_data/price_cache/`
+  - Download Yahoo Finance price history for the S&P universe with an initial 5-year backfill
+  - Persist parquet caches under `sp500_data/price_cache/` and append weekly deltas instead of re-downloading full horizons
   - Refresh the cached data asynchronously so the UI never blocks on Yahoo calls
 - **Execution:**
   - Run manually with `./run-price-sync.sh`

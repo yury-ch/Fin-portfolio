@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DATA_SERVICE_URL = "http://localhost:8001"
 CALCULATION_SERVICE_URL = "http://localhost:8002"
-ANALYSIS_PERIODS = ["1y", "2y", "3y"]
+ANALYSIS_PERIODS = ["1y", "2y", "3y", "5y"]
 DEFAULT_TICKERS = [
     "AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META","BRK-B","JPM","V"
 ]

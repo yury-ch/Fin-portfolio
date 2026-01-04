@@ -36,7 +36,7 @@ DATA_DIR = Path(__file__).resolve().parent / "sp500_data"
 ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"  # legacy single-period cache
 METADATA_FILE = DATA_DIR / "metadata.parquet"        # legacy single-period metadata
 HIDDEN_ANALYSIS_COLUMNS = ['analysis_timestamp', 'analysis_period', 'data_through']
-ANALYSIS_PERIODS = ["1y", "2y", "3y"]
+ANALYSIS_PERIODS = ["1y", "2y", "3y", "5y"]
 
 st.set_page_config(page_title="S&P Portfolio Optimizer", layout="wide")
 

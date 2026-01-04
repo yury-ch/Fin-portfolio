@@ -24,7 +24,12 @@ from shared.models import (
     AnalysisMetadata, CacheInfo
 )
 from shared.ticker_provider import WikipediaTickerProvider, DEFAULT_SP500_SAMPLE
-from shared.price_loader import PriceCacheManager, YahooPriceLoader
+from shared.price_loader import (
+    MASTER_INTERVAL,
+    MASTER_PERIOD,
+    PriceCacheManager,
+    YahooPriceLoader,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,7 +40,7 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "sp500_data"
 ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"  # legacy single cache
 METADATA_FILE = DATA_DIR / "metadata.parquet"
 HIDDEN_ANALYSIS_COLUMNS = ['analysis_timestamp', 'analysis_period', 'data_through']
-ANALYSIS_PERIODS = ["1y", "2y", "3y"]
+ANALYSIS_PERIODS = ["1y", "2y", "3y", "5y"]
 PRICE_CACHE_MAX_AGE_HOURS = (7 * 24) + 4  # weekly sync + small grace period
 ANALYSIS_CACHE_MAX_AGE_HOURS = (7 * 24) + 4
 
@@ -330,21 +335,26 @@ class DataService:
     def load_prices(self, tickers: List[str], period: str, interval: str) -> pd.DataFrame:
         """Load stock prices, preferring the asynchronous parquet cache."""
         tickers = tickers or self.get_sp500_universe()
+        if interval != MASTER_INTERVAL:
+            logger.warning("Unsupported interval %s; falling back to master interval %s", interval, MASTER_INTERVAL)
+            interval = MASTER_INTERVAL
         cached_df, metadata = self.price_cache.load_prices(
             tickers,
-            period,
+            MASTER_PERIOD,
             interval,
             max_age_hours=PRICE_CACHE_MAX_AGE_HOURS,
         )
         if cached_df is not None and not cached_df.empty:
+            trimmed = self.price_cache.trim_history(cached_df, period)
             logger.info(
-                "Serving %d tickers from price cache (%s/%s, synced %s)",
-                len(cached_df.columns),
-                period,
+                "Serving %d tickers from price cache (master %s/%s → %s slice, synced %s)",
+                len(trimmed.columns),
+                MASTER_PERIOD,
                 interval,
+                period,
                 metadata.last_synced.isoformat() if metadata else "unknown",
             )
-            return cached_df
+            return trimmed
 
         logger.info(
             "Price cache miss for %s/%s; downloading %d tickers from Yahoo Finance",
@@ -363,7 +373,7 @@ class DataService:
                 prices = 100 * np.exp(np.cumsum(returns))
                 mock_data[ticker] = prices
             return pd.DataFrame(mock_data, index=dates)
-        prices_df = PriceCacheManager.normalize_frame(prices_df)
+        prices_df = self.price_cache.normalize_frame(prices_df)
         return prices_df
     
 

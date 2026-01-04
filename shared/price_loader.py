@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "sp500_data"
 PRICE_CACHE_DIR = DATA_DIR / "price_cache"
+MASTER_PERIOD = "5y"
+MASTER_INTERVAL = "1d"
 
 
 def chunked(items: Iterable[str], size: int) -> List[List[str]]:
@@ -80,6 +83,8 @@ class PriceCacheManager:
         self._metadata: Dict[str, Dict] = self._load_metadata()
 
     def cache_path(self, period: str, interval: str) -> Path:
+        if period == MASTER_PERIOD and interval == MASTER_INTERVAL:
+            return self.cache_dir / "prices_master.parquet"
         safe_period = period.replace("/", "_")
         safe_interval = interval.replace("/", "_")
         return self.cache_dir / f"prices_{safe_period}_{safe_interval}.parquet"
@@ -105,11 +110,11 @@ class PriceCacheManager:
         except Exception as exc:
             logger.warning("Unable to persist price cache metadata: %s", exc)
 
-    @staticmethod
-    def normalize_frame(df: pd.DataFrame) -> pd.DataFrame:
+    def normalize_frame(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return df
         cleaned = df.copy()
+        cleaned.index = pd.to_datetime(cleaned.index)
         cleaned = cleaned.sort_index()
         cleaned = cleaned.apply(pd.to_numeric, errors="coerce")
         cleaned.replace([np.inf, -np.inf], pd.NA, inplace=True)
@@ -118,6 +123,34 @@ class PriceCacheManager:
         cleaned.dropna(axis=1, how="all", inplace=True)
         cleaned.dropna(axis=0, how="any", inplace=True)
         return cleaned
+
+    @staticmethod
+    def period_to_timedelta(period: str) -> Optional[pd.Timedelta]:
+        """Convert horizon strings like '1y' or '6M' to Timedelta."""
+        match = re.match(r"(?i)^\s*(\d+)\s*([ymd])\s*$", period or "")
+        if not match:
+            return None
+        value = int(match.group(1))
+        unit = match.group(2).lower()
+        if unit == "y":
+            return pd.Timedelta(days=365 * value)
+        if unit == "m":
+            return pd.Timedelta(days=30 * value)
+        if unit == "d":
+            return pd.Timedelta(days=value)
+        return None
+
+    def trim_history(self, df: pd.DataFrame, period: str) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+        delta = self.period_to_timedelta(period)
+        if delta is None:
+            return df
+        cutoff = pd.Timestamp.utcnow().tz_localize(None) - delta
+        trimmed = df[df.index >= cutoff]
+        return trimmed if not trimmed.empty else df.tail(1)
 
     def save_prices(
         self,
@@ -146,9 +179,8 @@ class PriceCacheManager:
         self._write_metadata()
         return metadata
 
-    def load_prices(
+    def load_full(
         self,
-        tickers: List[str],
         period: str,
         interval: str,
         max_age_hours: Optional[int] = None,
@@ -181,6 +213,18 @@ class PriceCacheManager:
         except Exception as exc:
             logger.error("Failed to read cached price parquet %s: %s", path, exc)
             return None, metadata
+        return df, metadata
+
+    def load_prices(
+        self,
+        tickers: List[str],
+        period: str,
+        interval: str,
+        max_age_hours: Optional[int] = None,
+    ) -> Tuple[Optional[pd.DataFrame], Optional[PriceCacheMetadata]]:
+        df, metadata = self.load_full(period, interval, max_age_hours)
+        if df is None:
+            return None, metadata
         available = [ticker for ticker in tickers if ticker in df.columns]
         if not available:
             return None, metadata
@@ -202,7 +246,14 @@ class YahooPriceLoader:
     def __init__(self, batch_size: int = 5):
         self.batch_size = max(1, batch_size)
 
-    def fetch_prices(self, tickers: List[str], period: str, interval: str) -> pd.DataFrame:
+    def fetch_prices(
+        self,
+        tickers: List[str],
+        period: Optional[str],
+        interval: str,
+        start: Optional[pd.Timestamp] = None,
+        end: Optional[pd.Timestamp] = None,
+    ) -> pd.DataFrame:
         successful_data: Dict[str, pd.Series] = {}
         failed_tickers: List[str] = []
 
@@ -211,15 +262,18 @@ class YahooPriceLoader:
                 if len(batch) == 1:
                     ticker = batch[0]
                     logger.info("Downloading data for %s", ticker)
-                    data = yf.download(
-                        ticker,
-                        period=period,
+                    request_kwargs = dict(
                         interval=interval,
                         auto_adjust=True,
                         prepost=False,
                         threads=False,
                         progress=False,
                     )
+                    if start is not None or end is not None:
+                        request_kwargs.update({"start": start, "end": end})
+                    else:
+                        request_kwargs["period"] = period
+                    data = yf.download(ticker, **request_kwargs)
                     series = self._extract_close_series(data)
                     if series is not None:
                         successful_data[ticker] = series
@@ -227,9 +281,7 @@ class YahooPriceLoader:
                         failed_tickers.append(ticker)
                 else:
                     logger.info("Downloading batch of %d tickers", len(batch))
-                    data = yf.download(
-                        " ".join(batch),
-                        period=period,
+                    request_kwargs = dict(
                         interval=interval,
                         group_by="ticker",
                         auto_adjust=True,
@@ -237,6 +289,11 @@ class YahooPriceLoader:
                         threads=False,
                         progress=False,
                     )
+                    if start is not None or end is not None:
+                        request_kwargs.update({"start": start, "end": end})
+                    else:
+                        request_kwargs["period"] = period
+                    data = yf.download(" ".join(batch), **request_kwargs)
                     if data.empty:
                         failed_tickers.extend(batch)
                     else:
