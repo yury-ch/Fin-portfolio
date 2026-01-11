@@ -1,0 +1,9 @@
+# Cron Timing (CET)
+CRON_TZ=Europe/Berlin
+
+# Weekly price/analysis sync (Monday 23:00 CET)
+0 23 * * 1 /path/to/fin-portfolio/run-price-sync.sh >> /var/log/price_sync.log 2>&1
+5 23 * * 1 /path/to/fin-portfolio/run-analysis-sync.sh >> /var/log/analysis_sync.log 2>&1
+
+# Monthly ticker validation (1st day, 06:30 CET)
+30 6 1 * * /path/to/fin-portfolio/.venv/bin/python /path/to/fin-portfolio/services/ticker_validation_service.py >> /var/log/ticker_validation.log 2>&1

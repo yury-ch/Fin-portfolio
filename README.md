@@ -1,3 +1,4 @@
+
 **Monolith app.py**
 
 1) Create a virtual env (recommended)
@@ -30,6 +31,9 @@ streamlit run app.py
 
 6) Refresh analysis cache right after price sync  
 `./run-analysis-sync.sh` — computes `sp500_analysis_<period>.parquet` so the UI serves precomputed metrics only.
+
+7) Monthly ticker validation  
+`python services/ticker_validation_service.py` — compares cached S&P constituents vs Wikipedia and writes reports under `sp500_data/validation/`.
 
 **Docker (all services)**
 

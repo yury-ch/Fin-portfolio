@@ -12,6 +12,7 @@ The application has been decomposed into four services:
   - Download the official Wikipedia S&P 500 constituents table
   - Persist cached tickers under `sp500_data/sp500_constituents.csv` (legacy Nasdaq cache auto-detected)
   - Provide diagnostics and manual refresh endpoints
+- **Validators:** Run `python services/ticker_validation_service.py` monthly to compare cached vs Wikipedia constituents and save reports under `sp500_data/validation/`.
 - **Endpoints:**
   - `GET /health` - Health check and cache metadata
   - `GET /sp500-tickers` - Return cached or freshly downloaded tickers
@@ -115,6 +116,7 @@ Run `./run-price-sync.sh` once per week to warm the Yahoo parquet cache. The rec
 CRON_TZ=Europe/Berlin
 0 23 * * 1 /path/to/repo/run-price-sync.sh >> /var/log/price_sync.log 2>&1
 5 23 * * 1 /path/to/repo/run-analysis-sync.sh >> /var/log/analysis_sync.log 2>&1
+30 6 1 * * /path/to/.venv/bin/python /path/to/repo/services/ticker_validation_service.py >> /var/log/ticker_validation.log 2>&1
 ```
 
 Or, to guarantee analysis immediately after price loading, chain them in a single entry:
@@ -124,7 +126,7 @@ CRON_TZ=Europe/Berlin
 0 23 * * 1 /path/to/repo/run-price-sync.sh && /path/to/repo/run-analysis-sync.sh >> /var/log/weekly_sync.log 2>&1
 ```
 
-This keeps both caches fresh every Monday at 23:00 CET/CEST. Adjust the path/log destination as needed and pass `--force-refresh-tickers` to either script when you need a fresh universe download.
+This keeps both caches fresh every Monday at 23:00 CET/CEST and runs ticker validation on the first day of each month. Adjust the path/log destination as needed and pass `--force-refresh-tickers` to either script when you need a fresh universe download. Sample launchd plists live under `ops/launchd/`.
 
 ## Manual Service Startup
 
