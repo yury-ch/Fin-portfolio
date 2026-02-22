@@ -52,11 +52,16 @@ class AnalysisSyncService:
         master_df, _ = self.price_cache.load_full(MASTER_PERIOD, self.interval)
         if master_df is None or master_df.empty:
             raise RuntimeError(f"No master price cache available. Run price sync for {MASTER_PERIOD}.")
-        available = list(master_df.columns)
-        missing = len(set(tickers) - set(available))
+        available = set(master_df.columns)
+        available_tickers = [ticker for ticker in tickers if ticker in available]
+        missing = len(tickers) - len(available_tickers)
         if missing > 0:
             logger.warning("Master price cache missing %d tickers for analysis slice %s", missing, period)
-        slice_df = self.price_cache.trim_history(master_df[tickers], period)
+        if not available_tickers:
+            raise RuntimeError(
+                f"Master price cache does not contain any requested tickers for analysis slice {period}."
+            )
+        slice_df = self.price_cache.trim_history(master_df[available_tickers], period)
         if slice_df.empty:
             raise RuntimeError(f"No data in master cache for {period}. Ensure price sync covered this window.")
         return slice_df

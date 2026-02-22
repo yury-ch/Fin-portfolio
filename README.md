@@ -1,46 +1,53 @@
+# S&P 500 Portfolio Optimizer
 
-**Monolith app.py**
+This project is a portfolio optimization tool for S&P 500 stocks. It provides a Streamlit-based user interface to analyze stocks and build optimal portfolios based on various financial metrics.
 
-1) Create a virtual env (recommended)
-python3 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+## Architecture
 
-2) Install dependencies
-pip install -r requirements.txt
+The project currently has two modes of operation:
 
-3) Start the app
+1.  **Monolith:** A single Streamlit application (`app.py`) that contains all the logic.
+2.  **Microservices:** A set of FastAPI services for different concerns (ticker, data, calculation) and a separate Streamlit presentation service for the UI.
+
+A detailed analysis of the current architecture and its technical debt can be found in the `TECHNICAL_DEBT.md` file. It is highly recommended to read this file to understand the current state of the project and the recommended improvements.
+
+## How to Run
+
+### Monolith
+
+To run the monolithic version of the application, use the following command:
+
+```bash
 streamlit run app.py
+```
 
-**Microservices**
+### Microservices
 
-1) Create a virtual env (recommended)  
-`python3 -m venv .venv`  
-`source .venv/bin/activate`  (Windows: `.venv\Scripts\activate`)
+To run the microservices version, you first need to start the services:
 
-2) Install dependencies  
-`pip install -r requirements-microservices.txt`
+```bash
+./start-microservices.sh
+```
 
-3) Start microservices  
-`python start-microservices.py` (ticker service on 8000, data on 8001, calculation on 8002)
+Then, in a separate terminal, start the presentation layer:
 
-4) Start UI  
-`streamlit run services/presentation_service.py`
+```bash
+streamlit run services/presentation_service.py
+```
 
-5) Warm Yahoo price cache (async loader)  
-`./run-price-sync.sh` — first run backfills 5 years; subsequent runs fetch only new deltas. Ideal for cron every Monday 23:00 CET so API calls serve from parquet.
+### Docker
 
-6) Refresh analysis cache right after price sync  
-`./run-analysis-sync.sh` — computes `sp500_analysis_<period>.parquet` so the UI serves precomputed metrics only.
+The project can also be run using Docker. The Docker setup is configured for the microservices architecture.
 
-7) Monthly ticker validation  
-`python services/ticker_validation_service.py` — compares cached S&P constituents vs Wikipedia and writes reports under `sp500_data/validation/`.
+To build the Docker image:
 
-**Docker (all services)**
+```bash
+docker build -t fin-portfolio .
+```
 
-1) Build the image  
-`docker build -t sp500-microservices .`
+To run the application in a Docker container:
 
-2) Run the stack  
-`docker run -p 8501:8501 -p 8001:8001 -p 8002:8002 sp500-microservices`
-
-Then open `http://localhost:8501` for the Streamlit UI (FastAPI docs at ports 8000/8001/8002).
+```bash
+docker run -p 8501:8501 -p 8000:8000 -p 8001:8001 -p 8002:8002 fin-portfolio
+```
+Then open your browser to `http://localhost:8501`.
