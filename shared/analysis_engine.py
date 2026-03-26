@@ -5,6 +5,36 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+
+def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Align cached data with the expected analyzer schema.
+
+    This is the single source of truth for column normalization.
+    Previously duplicated in data_service.py and presentation_service.py.
+    """
+    if df is None or df.empty:
+        return df
+    column_mapping = {
+        'ticker': 'Ticker',
+        'total_return_pct': 'Annual_Return',
+        'sharpe_ratio': 'Sharpe_Ratio',
+        'volatility_pct': 'Volatility',
+        'max_drawdown_pct': 'Max_Drawdown',
+        'current_price': 'Current_Price',
+        'composite_score': 'Composite_Score',
+    }
+    df = df.copy()
+    df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns}, inplace=True)
+    if 'Recent_3M_Return' not in df.columns:
+        df['Recent_3M_Return'] = 0.0
+    if 'Annual_Return' in df.columns and df['Annual_Return'].max() > 1:
+        df['Annual_Return'] = df['Annual_Return'] / 100.0
+    if 'Volatility' in df.columns and df['Volatility'].max() > 1:
+        df['Volatility'] = df['Volatility'] / 100.0
+    if 'Max_Drawdown' in df.columns and df['Max_Drawdown'].min() > -1:
+        df['Max_Drawdown'] = -df['Max_Drawdown'] / 100.0
+    return df
+
 logger = logging.getLogger(__name__)
 
 

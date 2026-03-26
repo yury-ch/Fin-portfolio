@@ -2,8 +2,14 @@
 # run-monolith.sh
 # Execute S&P 500 Portfolio Optimizer - Monolith Version
 
-echo "🚀 Starting S&P 500 Portfolio Optimizer (Monolith)"
-echo "=================================================="
+echo "⚠️  DEPRECATED: The monolithic app.py is deprecated."
+echo "   Please use the microservices stack instead:"
+echo "   ./run-microservices.sh"
+echo ""
+echo "Starting anyway for legacy compatibility..."
+echo ""
+echo "🚀 Starting S&P 500 Portfolio Optimizer (Monolith - DEPRECATED)"
+echo "================================================================"
 
 # Check if virtual environment exists
 if [ ! -d ".venv" ]; then

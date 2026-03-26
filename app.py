@@ -1,5 +1,15 @@
 # app.py
 # -------------------------------
+# DEPRECATED: Monolithic S&P 500 Portfolio Optimizer
+#
+# This file is deprecated. The project has migrated to a microservices
+# architecture. Use the microservices stack instead:
+#
+#   ./run-microservices.sh
+#
+# The primary entry point is services/presentation_service.py (port 8501).
+# This file is retained for reference only and will be removed in a future release.
+# -------------------------------
 # S&P 500 Portfolio Optimizer
 # Streamlit + yfinance + PyPortfolioOpt
 # -------------------------------
