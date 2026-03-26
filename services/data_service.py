@@ -4,21 +4,22 @@
 # Handles yfinance API calls, data caching, and S&P 500 analysis
 # -------------------------------
 
-import pandas as pd
 import numpy as np
-from typing import List, Tuple, Dict, Optional, Any
-import time
-import yfinance as yf
+import pandas as pd
+from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 from datetime import datetime, timedelta
 import logging
-from fastapi import FastAPI, HTTPException, Query
+import subprocess
 import sys
 import os
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, Query
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from shared.analysis_engine import standardize_analysis_columns
 from shared.models import (
     StockDataRequest, StockAnalysisRequest, ServiceResponse,
     AnalysisMetadata, CacheInfo
@@ -46,32 +47,6 @@ ANALYSIS_CACHE_MAX_AGE_HOURS = (7 * 24) + 4
 
 # S&P 500 Top 100 stocks
 SP500_SAMPLE = list(DEFAULT_SP500_SAMPLE)
-
-def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Align cached data with the expected analyzer schema."""
-    if df is None or df.empty:
-        return df
-    column_mapping = {
-        'ticker': 'Ticker',
-        'total_return_pct': 'Annual_Return',
-        'sharpe_ratio': 'Sharpe_Ratio',
-        'volatility_pct': 'Volatility',
-        'max_drawdown_pct': 'Max_Drawdown',
-        'current_price': 'Current_Price',
-        'composite_score': 'Composite_Score'
-    }
-    df = df.copy()
-    df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns}, inplace=True)
-    if 'Recent_3M_Return' not in df.columns:
-        df['Recent_3M_Return'] = 0.0
-    if 'Annual_Return' in df.columns and df['Annual_Return'].max() > 1:
-        df['Annual_Return'] = df['Annual_Return'] / 100.0
-    if 'Volatility' in df.columns and df['Volatility'].max() > 1:
-        df['Volatility'] = df['Volatility'] / 100.0
-    if 'Max_Drawdown' in df.columns and df['Max_Drawdown'].min() > -1:
-        df['Max_Drawdown'] = -df['Max_Drawdown'] / 100.0
-    return df
-
 
 class DataService:
     """Data Service for handling stock data download and persistence"""
@@ -171,80 +146,6 @@ class DataService:
         if not last_updated:
             return True
         return (datetime.now() - last_updated) > timedelta(hours=max_age_hours)
-    
-    def compute_sp500_analysis(self, tickers: List[str], period: str = "1y") -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
-        """Replicates the Streamlit app's analyzer logic."""
-        results: List[Dict[str, Any]] = []
-        latest_data_timestamp: Optional[pd.Timestamp] = None
-        
-        for ticker in tickers:
-            try:
-                data = yf.download(ticker, period=period, interval="1d", progress=False)
-                if data.empty:
-                    continue
-                prices = data['Adj Close'] if 'Adj Close' in data.columns else data['Close']
-                returns = prices.pct_change().dropna()
-                if len(returns) < 60:
-                    continue
-                daily_log = np.log(prices).diff().dropna()
-                if daily_log.empty:
-                    continue
-                mean_log = daily_log.mean()
-                ann_return = float(np.exp(mean_log * 252) - 1)
-                ann_vol = float(returns.std() * np.sqrt(252))
-                sharpe = float(ann_return / ann_vol) if ann_vol > 0 else 0.0
-                cumulative = (1 + returns).cumprod()
-                rolling_max = cumulative.expanding().max()
-                drawdown = (cumulative - rolling_max) / rolling_max
-                max_drawdown = float(drawdown.min())
-                if len(prices) >= 63:
-                    recent_return = float((prices.iloc[-1] / prices.iloc[-63]) - 1)
-                else:
-                    recent_return = 0.0
-                current_price = float(prices.iloc[-1])
-                data_end = prices.index.max()
-                if isinstance(data_end, pd.Timestamp):
-                    if latest_data_timestamp is None or data_end > latest_data_timestamp:
-                        latest_data_timestamp = data_end
-                results.append({
-                    'Ticker': ticker,
-                    'Annual_Return': ann_return,
-                    'Volatility': ann_vol,
-                    'Sharpe_Ratio': sharpe,
-                    'Max_Drawdown': max_drawdown,
-                    'Recent_3M_Return': recent_return,
-                    'Current_Price': current_price
-                })
-            except Exception as exc:
-                logger.warning(f"Failed to analyze {ticker}: {exc}")
-                continue
-            time.sleep(0.2)
-        
-        if not results:
-            return pd.DataFrame(), latest_data_timestamp
-        df = pd.DataFrame(results)
-        
-        def safe_normalize(series: pd.Series, inverse: bool = False) -> pd.Series:
-            range_val = series.max() - series.min()
-            if range_val == 0:
-                return pd.Series([0.5] * len(series), index=series.index)
-            normalized = (series - series.min()) / range_val
-            return 1 - normalized if inverse else normalized
-        
-        df['Return_Score'] = safe_normalize(df['Annual_Return'])
-        df['Vol_Score'] = safe_normalize(df['Volatility'], inverse=True)
-        df['Sharpe_Score'] = safe_normalize(df['Sharpe_Ratio'])
-        df['Drawdown_Score'] = safe_normalize(df['Max_Drawdown'], inverse=True)
-        df['Momentum_Score'] = safe_normalize(df['Recent_3M_Return'])
-        df['Composite_Score'] = (
-            0.25 * df['Return_Score'] +
-            0.20 * df['Vol_Score'] +
-            0.25 * df['Sharpe_Score'] +
-            0.15 * df['Drawdown_Score'] +
-            0.15 * df['Momentum_Score']
-        )
-        df = df.sort_values('Composite_Score', ascending=False).reset_index(drop=True)
-        return df, latest_data_timestamp
     
     def analyze_sp500_stocks(self, tickers: Optional[List[str]] = None, period: str = "1y", force_refresh: bool = False) -> Tuple[pd.DataFrame, dict]:
         """Return cached analysis generated by the offline analysis sync service."""
@@ -377,9 +278,47 @@ class DataService:
         return prices_df
     
 
+def _trigger_analysis_sync_if_needed(ds: "DataService") -> None:
+    """Spawn analysis_sync_service in background if cache is missing or stale."""
+    cache_info = ds.get_cache_info()
+    if cache_info.has_cache and not cache_info.is_stale:
+        logger.info("Analysis cache is present and fresh — skipping auto-seed.")
+        return
+
+    # Check price cache exists before attempting sync
+    master_df, _ = ds.price_cache.load_full(MASTER_PERIOD, MASTER_INTERVAL)
+    if master_df is None or master_df.empty:
+        reason = "stale" if cache_info.has_cache else "missing"
+        logger.warning(
+            "Analysis cache is %s but master price cache is not available. "
+            "Run './run-price-sync.sh' first, then './run-analysis-sync.sh'.",
+            reason,
+        )
+        return
+
+    reason = "stale" if cache_info.has_cache else "missing"
+    logger.info("Analysis cache is %s — spawning analysis_sync_service in background.", reason)
+    sync_script = Path(__file__).resolve().parent / "analysis_sync_service.py"
+    subprocess.Popen(
+        [sys.executable, str(sync_script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _trigger_analysis_sync_if_needed(data_service)
+    yield
+
+
 # Initialize FastAPI app
-app = FastAPI(title="Data Service", description="Stock data download and analysis service")
 data_service = DataService()
+app = FastAPI(
+    title="Data Service",
+    description="Stock data download and analysis service",
+    lifespan=lifespan,
+)
 
 @app.get("/health")
 async def health_check():
@@ -456,6 +395,104 @@ async def get_sp500_tickers():
     """Get list of S&P 500 sample tickers"""
     tickers = data_service.get_sp500_universe()
     return ServiceResponse(success=True, data=tickers)
+
+@app.get("/price-cache-info")
+async def get_price_cache_info():
+    """Get per-period price cache metadata (last synced, tickers, rows, data_through)."""
+    try:
+        summary = data_service.price_cache.cache_summary()
+        serializable = {}
+        for key, meta in summary.items():
+            serializable[key] = {
+                k: v.isoformat() if hasattr(v, "isoformat") else v
+                for k, v in meta.items()
+            }
+        return ServiceResponse(success=True, data=serializable)
+    except Exception as e:
+        logger.error(f"Error in get_price_cache_info: {e}")
+        return ServiceResponse(success=False, error=str(e))
+
+@app.get("/ticker-validation")
+async def get_ticker_validation():
+    """Return the most recent ticker validation result from sp500_data/validation/."""
+    try:
+        import json
+        validation_dir = DATA_DIR / "validation"
+        files = sorted(validation_dir.glob("ticker_validation_*.json")) if validation_dir.exists() else []
+        if not files:
+            return ServiceResponse(success=True, data=None)
+        with open(files[-1]) as f:
+            return ServiceResponse(success=True, data=json.load(f))
+    except Exception as e:
+        logger.error(f"Error in get_ticker_validation: {e}")
+        return ServiceResponse(success=False, error=str(e))
+
+@app.get("/sync-report")
+async def get_sync_report():
+    """Return the latest price sync report written by price_sync_service."""
+    try:
+        import json
+        report_path = DATA_DIR / "price_cache" / "sync_report.json"
+        if not report_path.exists():
+            return ServiceResponse(success=True, data=None)
+        with open(report_path) as f:
+            return ServiceResponse(success=True, data=json.load(f))
+    except Exception as e:
+        logger.error(f"Error in get_sync_report: {e}")
+        return ServiceResponse(success=False, error=str(e))
+
+@app.get("/ticker-changes")
+async def get_ticker_changes():
+    """Derive a chronological change log from all validation snapshot files."""
+    try:
+        import json
+        validation_dir = DATA_DIR / "validation"
+        files = sorted(validation_dir.glob("ticker_validation_*.json"))
+        events: dict = {}  # (ticker, action) -> earliest event
+
+        for path in files:
+            try:
+                with open(path) as f:
+                    snap = json.load(f)
+            except Exception:
+                continue
+            ts = snap.get("timestamp")
+            for ticker in snap.get("new_in_remote") or []:
+                key = (ticker, "added")
+                if key not in events:
+                    events[key] = {"timestamp": ts, "ticker": ticker,
+                                   "action": "added", "source_file": path.name}
+            for ticker in snap.get("missing_from_remote") or []:
+                key = (ticker, "removed")
+                if key not in events:
+                    events[key] = {"timestamp": ts, "ticker": ticker,
+                                   "action": "removed", "source_file": path.name}
+
+        log = sorted(events.values(), key=lambda e: e["timestamp"] or "", reverse=True)
+
+        latest_pending: dict = {}
+        if files:
+            try:
+                with open(files[-1]) as f:
+                    latest = json.load(f)
+                latest_pending = {
+                    "added": latest.get("new_in_remote") or [],
+                    "removed": latest.get("missing_from_remote") or [],
+                    "timestamp": latest.get("timestamp"),
+                    "match": latest.get("match", True),
+                }
+            except Exception:
+                pass
+
+        return ServiceResponse(success=True, data={
+            "changes": log,
+            "total_runs": len(files),
+            "pending": latest_pending,
+        })
+    except Exception as e:
+        logger.error(f"Error in get_ticker_changes: {e}")
+        return ServiceResponse(success=False, error=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn

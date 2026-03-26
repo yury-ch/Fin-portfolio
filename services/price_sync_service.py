@@ -5,7 +5,8 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import timedelta
+import json
+from datetime import timedelta, timezone, datetime
 from typing import List, Sequence
 
 import pandas as pd
@@ -84,7 +85,7 @@ class PriceSyncService:
         trimmed = self.cache_manager.trim_history(merged, period)
         return trimmed
 
-    def _sync_period(self, tickers: List[str], period: str):
+    def _sync_period(self, tickers: List[str], period: str) -> dict:
         df, _ = self.cache_manager.load_full(period, self.interval)
         if df is None or df.empty:
             refreshed = self._initial_sync(tickers, period)
@@ -93,15 +94,27 @@ class PriceSyncService:
         if not isinstance(refreshed.index, pd.DatetimeIndex):
             refreshed.index = pd.to_datetime(refreshed.index)
         metadata = self.cache_manager.save_prices(refreshed, period, self.interval)
+        loaded = set(refreshed.columns)
+        failed = sorted(t for t in tickers if t not in loaded)
         logger.info(
-            "Sync complete for %s/%s (%d rows, %d tickers through %s)",
+            "Sync complete for %s/%s (%d rows, %d tickers, %d failed, through %s)",
             period,
             self.interval,
-            getattr(metadata, "rows", 0),
-            len(refreshed.columns),
+            metadata.rows,
+            len(loaded),
+            len(failed),
             metadata.data_through.isoformat() if metadata.data_through else "unknown",
         )
-        return metadata
+        return {
+            "period": period,
+            "tickers_attempted": len(tickers),
+            "tickers_loaded": len(loaded),
+            "tickers_failed": len(failed),
+            "failed_list": failed,
+            "rows": metadata.rows,
+            "data_through": metadata.data_through.isoformat() if metadata.data_through else None,
+            "last_synced": metadata.last_synced.isoformat(),
+        }
 
     async def run(self):
         tickers = self.load_tickers()
@@ -119,6 +132,28 @@ class PriceSyncService:
             for failure in failures:
                 logger.error("Sync failure: %s", failure)
             raise RuntimeError(f"{len(failures)} sync tasks failed")
+
+        period_stats = {r["period"]: r for r in results}
+        all_failed = sorted({t for r in results for t in r.get("failed_list", [])})
+        failed_all_periods = sorted(
+            set(all_failed) & set.intersection(*(set(r["failed_list"]) for r in results))
+        ) if results else []
+
+        report = {
+            "run_timestamp": datetime.now(timezone.utc).isoformat(),
+            "tickers_attempted": len(tickers),
+            "tickers_ok_all_periods": len(tickers) - len(all_failed),
+            "tickers_failed_any_period": len(all_failed),
+            "tickers_failed_all_periods": len(failed_all_periods),
+            "failed_any_period": all_failed,
+            "failed_all_periods": failed_all_periods,
+            "periods": period_stats,
+        }
+        report_path = self.cache_manager.cache_dir / "sync_report.json"
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2)
+        logger.info("Sync report written to %s", report_path)
+
         return results
 
 
