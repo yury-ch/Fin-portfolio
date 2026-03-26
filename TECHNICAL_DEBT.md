@@ -9,7 +9,7 @@ This document outlines the key areas of technical debt in the S&P 500 Portfolio 
 | # | Item | Priority | Status |
 |---|---|---|---|
 | 1 | Code duplication — shared analysis logic | P1 | ✅ Resolved |
-| 2 | Monolithic `app.py` still active | P1 | ✅ Deprecated (not yet deleted) |
+| 2 | Monolithic `app.py` still active | P1 | ✅ Completed |
 | 3 | Competing architectures | P2 | ✅ Direction decided |
 | 4 | Brittle service startup / no health checks | P2 | ✅ Resolved |
 | 5 | No docker-compose.yml | P2 | ⏳ Open |
@@ -26,9 +26,9 @@ This document outlines the key areas of technical debt in the S&P 500 Portfolio 
 
 `shared/analysis_engine.py` created with `standardize_analysis_columns`, `AnalysisEngine`, and `AnalysisResult`. `services/presentation_service.py` and `services/data_service.py` both import from this shared module. `app.py` still has its own copy of `standardize_analysis_columns`, but `app.py` is now deprecated (see item 2).
 
-### 2. Monolithic `app.py` — deprecated (was P1)
+### 2. Monolithic `app.py` — deleted (was P1)
 
-`app.py` (1,111 lines) is now marked deprecated with a header warning directing users to the microservices stack. `run-monolith.sh` also prints a deprecation notice. The file has not been deleted yet — see next steps below.
+`app.py` (1,111 lines) has been removed. `run-monolith.sh` is now an error stub that prints a message directing users to `./run-microservices.sh` and exits with code 1. `stop-monolith.sh` was also deleted. No Python file imported `app.py`; documentation updated accordingly.
 
 ### 3. Competing architectures — direction decided (was P2)
 
@@ -45,14 +45,6 @@ The microservices stack (`services/presentation_service.py` + `ticker_service` +
 ---
 
 ## ⏳ Open — Next Steps (by priority)
-
-### P1 — Delete or hollow out `app.py`
-
-**Action:** Remove `app.py` entirely, or strip it to a thin redirect stub that prints the deprecation message and exits. The duplicated `standardize_analysis_columns` and all analysis/optimization logic inside it should go.
-
-**Why now:** The deprecation notice does not prevent someone from running it and getting divergent results. It is the single largest remaining source of confusion.
-
----
 
 ### P2 — Add `docker-compose.yml`
 

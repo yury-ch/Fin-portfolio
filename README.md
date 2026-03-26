@@ -4,7 +4,7 @@ A portfolio optimization tool for S&P 500 stocks. Analyzes the full S&P 500 univ
 
 ## Architecture
 
-The project uses a **microservices architecture** as the primary deployment target. The legacy monolithic `app.py` is deprecated.
+The project uses a **microservices architecture**.
 
 ```
 services/
@@ -52,14 +52,6 @@ docker run -p 8501:8501 -p 8000:8000 -p 8001:8001 -p 8002:8002 fin-portfolio
 
 Open **http://localhost:8501**. The container entrypoint waits for each service to pass its `/health` check before starting the next one.
 
-### Monolith (deprecated)
-
-`app.py` is retained for reference only. Use microservices instead.
-
-```bash
-./run-monolith.sh   # prints deprecation warning, then launches app.py
-```
-
 ## Service Endpoints
 
 | Service | URL | Purpose |
@@ -100,8 +92,8 @@ Open **http://localhost:8501**. The container entrypoint waits for each service 
 - `standardize_analysis_columns()` consolidated into `shared/analysis_engine.py` — previously duplicated in `data_service.py` and `presentation_service.py`
 - Dead `compute_sp500_analysis()` method removed from `data_service.py` (the service is cache-first; `shared/analysis_engine.py` is the canonical implementation)
 
-#### P1 — Monolith Deprecated
-- `app.py` marked deprecated; `run-monolith.sh` prints a warning pointing to microservices
+#### P1 — Monolith Removed
+- `app.py` deleted; `run-monolith.sh` replaced with an error stub directing users to microservices
 
 #### P2 — Service Reliability
 - `presentation_service.py` startup retries each backend health check up to 10× with a 2 s backoff and shows a Streamlit spinner instead of failing immediately
