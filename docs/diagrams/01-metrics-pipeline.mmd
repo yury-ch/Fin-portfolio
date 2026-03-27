@@ -1,0 +1,40 @@
+---
+title: "Per-Ticker Metrics Pipeline"
+---
+flowchart TD
+    A["Price series\nP₁, P₂, …, Pₙ\n(daily closes, min 60 bars)"]
+
+    A --> B["Simple daily returns\nrₜ = Pₜ/Pₜ₋₁ − 1"]
+    A --> C["Log daily returns\nlₜ = ln(Pₜ) − ln(Pₜ₋₁)"]
+    A --> D["Cumulative return series\nCₜ = ∏(1 + rᵢ)"]
+
+    B --> V["📊 Annual Volatility\nσ = std(r) × √252"]
+    C --> R["📈 Annual Return\nμ = exp(mean(l) × 252) − 1"]
+    R --> SH["⚖️ Sharpe Ratio\nS = μ / σ\n(risk-free = 0)"]
+    V --> SH
+
+    D --> RX["Rolling max\nMₜ = max(C₁…Cₜ)"]
+    RX --> DD["Drawdown series\nDₜ = (Cₜ − Mₜ) / Mₜ"]
+    DD --> MD["📉 Max Drawdown\nMDD = min(D)  ≤ 0"]
+
+    A --> MO["🚀 3-Month Momentum\nM₃ = P_last / P₋₆₃ − 1\n(0.0 if fewer than 63 bars)"]
+    A --> CP["💰 Current Price\nP_last"]
+
+    R  --> OUT
+    V  --> OUT
+    SH --> OUT
+    MD --> OUT
+    MO --> OUT
+    CP --> OUT
+
+    OUT["AnalysisResult\n───────────────\nTicker  Annual_Return\nVolatility  Sharpe_Ratio\nMax_Drawdown  Recent_3M_Return\nCurrent_Price"]
+
+    classDef metric fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f,font-weight:bold
+    classDef output fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef input  fill:#f1f5f9,stroke:#94a3b8,color:#1e293b
+    classDef inter  fill:#fef9c3,stroke:#ca8a04,color:#422006
+
+    class A input
+    class V,R,SH,MD,MO,CP metric
+    class OUT output
+    class B,C,D,RX,DD inter

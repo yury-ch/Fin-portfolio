@@ -1,0 +1,45 @@
+---
+title: "Portfolio Optimisation Pipeline"
+---
+flowchart TD
+    INPUT["prices_df\nN tickers × T days"]
+
+    INPUT --> STATS["compute_stats()\n────────────────\nμ = mean_historical_return(prices, freq=252)\nΣ = sample_cov(prices, freq=252)"]
+
+    STATS --> BOUND{"N assets ≤ 3?"}
+
+    BOUND -- yes --> EF1["EfficientFrontier(μ, Σ)\nweight_bounds = (0, 1)\nL2 disabled"]
+    BOUND -- no  --> EF2["EfficientFrontier(μ, Σ)\nweight_bounds = (0, max_weight / 100)\nadd_objective(L2_reg, γ=l2_reg)"]
+
+    EF1 & EF2 --> OBJ{"objective"}
+
+    OBJ -- "Max Sharpe" --> MS["ef.max_sharpe(\n  risk_free_rate = risk_free / 100\n)"]
+    OBJ -- "Min Vol\n(target return)" --> ER["ef.efficient_return(\n  target_return = target_return / 100\n)"]
+
+    MS & ER --> FAIL{"solver\nfailed?"}
+    FAIL -- yes --> FB["ef.min_volatility()\nauto-fallback"]
+    FAIL -- no  --> CLEAN
+
+    FB --> CLEAN["raw_weights = ef.clean_weights(cutoff=0)"]
+
+    CLEAN --> PRUNE["enforce_min_holdings()\n see detail diagram"]
+
+    PRUNE --> ALLOC["DiscreteAllocation(\n  weights,  latest_prices,\n  total_portfolio_value\n).greedy_portfolio()"]
+
+    ALLOC --> PERF["ef.portfolio_performance()\n→ exp_return, volatility, sharpe"]
+
+    PERF --> OUT["OptimizationResult\n────────────────────\nweights  allocation  leftover_cash\nexpected_annual_return\nannual_volatility  sharpe_ratio"]
+
+    classDef input   fill:#f1f5f9,stroke:#94a3b8,color:#1e293b
+    classDef calc    fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef decide  fill:#fef9c3,stroke:#ca8a04,color:#422006
+    classDef solver  fill:#ede9fe,stroke:#7c3aed,color:#2e1065
+    classDef output  fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef fallbk  fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+
+    class INPUT input
+    class STATS,CLEAN,ALLOC,PERF calc
+    class BOUND,OBJ,FAIL decide
+    class EF1,EF2,MS,ER,PRUNE solver
+    class FB fallbk
+    class OUT output

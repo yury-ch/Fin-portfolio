@@ -18,6 +18,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.models import (
     PortfolioOptimizationRequest, ServiceResponse, OptimizationResult
 )
+from shared.config import DEFAULT_RISK_FREE_RATE
 
 try:
     from pypfopt import (
@@ -143,7 +144,7 @@ class CalculationService:
             total_return = (1 + portfolio_returns).prod() - 1
             annual_return = (1 + total_return) ** (252 / len(portfolio_returns)) - 1
             volatility = portfolio_returns.std() * np.sqrt(252)
-            sharpe_ratio = (annual_return - 0.02) / volatility if volatility > 0 else 0
+            sharpe_ratio = (annual_return - DEFAULT_RISK_FREE_RATE) / volatility if volatility > 0 else 0
             
             # Max drawdown
             cumulative = (1 + portfolio_returns).cumprod()

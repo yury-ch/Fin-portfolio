@@ -1,0 +1,26 @@
+---
+title: "enforce_min_holdings() — Weight Pruning"
+---
+flowchart TD
+    W["raw_weights\nfrom ef.clean_weights()"]
+
+    W --> THRESH["keep = weights  ≥  prune_below_pct / 100\ne.g. 0.25 %  →  threshold = 0.0025"]
+
+    THRESH --> ENOUGH{"len(keep) ≥ min_holdings?"}
+
+    ENOUGH -- "yes — threshold alone\nsatisfies minimum" --> NORM1["return keep / keep.sum()\n✅ renormalised to 1.0"]
+
+    ENOUGH -- "no — too many weights\nwere below threshold" --> TOP["top_n = weights\n  .sort_values(desc)\n  .head(min_holdings)"]
+    TOP --> NORM2["return top_n / top_n.sum()\n✅ guarantees minimum holdings\neven if below threshold"]
+
+    NOTE["⚠️  prune_below_pct is in percent\n0.25  means  0.25%  (not 25%)\npass 10 to prune weights below 10%"]
+
+    classDef input   fill:#f1f5f9,stroke:#94a3b8,color:#1e293b
+    classDef decide  fill:#fef9c3,stroke:#ca8a04,color:#422006
+    classDef output  fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef warn    fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+
+    class W input
+    class THRESH,ENOUGH decide
+    class NORM1,NORM2 output
+    class NOTE warn

@@ -1,0 +1,111 @@
+---
+title: S&P 500 Portfolio Optimizer — Architecture
+---
+flowchart TB
+
+    %% ── External sources ──────────────────────────────────────────
+    WIKI["🌐 Wikipedia\nS&P 500 table"]
+    YAHOO["📈 Yahoo Finance\nyfinance API"]
+
+    %% ── Operator / cron ──────────────────────────────────────────
+    subgraph CRON["⏰ Scheduled Jobs (cron / manual)"]
+        direction LR
+        PS["price_sync_service\nWeekly delta sync"]
+        AS["analysis_sync_service\nWeekly analysis compute"]
+        TV["ticker_validation_service\nMonthly universe diff"]
+    end
+
+    %% ── Shared library ───────────────────────────────────────────
+    subgraph SHARED["📦 shared/"]
+        direction LR
+        AE["analysis_engine.py\nMetrics + scoring"]
+        PL["price_loader.py\nParquet cache R/W\nYahoo wrapper"]
+        TP["ticker_provider.py\nWikipedia scraper\n+ CSV cache"]
+        M["models.py\nPydantic models"]
+    end
+
+    %% ── Container ────────────────────────────────────────────────
+    subgraph CONTAINER["🐳 Docker Container  (docker-compose.yml)"]
+        direction TB
+
+        EP["docker-entrypoint.sh\nwait_for_healthy → ordered startup"]
+
+        subgraph SVCS["Runtime Services"]
+            direction LR
+            TS["ticker_service\n:8000  FastAPI\n─────────────\nGET /tickers\nPOST /refresh"]
+            DS["data_service\n:8001  FastAPI\n─────────────\nPOST /sp500-analysis\nPOST /stock-data\nGET  /cache-info\nGET  /ticker-changes\nGET  /sync-report"]
+            CS["calculation_service\n:8002  FastAPI\n─────────────\nPOST /optimize-portfolio\nPOST /portfolio-metrics\nPOST /compute-stats"]
+            UI["presentation_service\n:8501  Streamlit\n─────────────\n🔍 Stock Analyzer\n📊 Portfolio Optimizer\n📋 Data Health\n🔄 Universe Changes"]
+        end
+
+        EP -->|starts & health-checks| SVCS
+    end
+
+    %% ── Persistent storage ───────────────────────────────────────
+    subgraph STORAGE["💾 sp500_data/  (host volume)"]
+        direction TB
+        CSV["sp500_constituents.csv\nticker universe"]
+        PARQ["price_cache/*.parquet\nmaster 5y + period slices\nmetadata.json  sync_report.json"]
+        ANAL["sp500_analysis_*.parquet\n1y / 2y / 3y / 5y"]
+        VAL["validation/\nticker_validation_*.json\nmonthly snapshots"]
+    end
+
+    %% ── Browser ──────────────────────────────────────────────────
+    BROWSER["🖥️ Analyst Browser\nlocalhost:8501"]
+
+    %% ── Data flow: external → jobs → storage ─────────────────────
+    WIKI -->|HTTP scrape| TP
+    YAHOO -->|yfinance batch| PL
+
+    TP -->|writes| CSV
+    PS -->|reads| TP
+    PS -->|reads / writes| PARQ
+    AS -->|reads| PARQ
+    AS -->|writes| ANAL
+    TV -->|reads| CSV
+    TV -->|writes| VAL
+
+    %% ── Shared lib used by jobs ───────────────────────────────────
+    PS -.->|uses| PL
+    AS -.->|uses| AE
+    AS -.->|uses| PL
+    TV -.->|uses| TP
+
+    %% ── Runtime services ← shared + storage ──────────────────────
+    TS -.->|uses| TP
+    DS -.->|uses| PL
+    DS -.->|uses| AE
+    DS -.->|uses| M
+    CS -.->|uses| M
+    UI -.->|uses| M
+
+    TS -->|reads / writes| CSV
+    DS -->|reads| PARQ
+    DS -->|reads| ANAL
+    DS -->|reads| VAL
+    DS -->|spawns on stale cache| AS
+
+    %% ── UI → backend HTTP ────────────────────────────────────────
+    UI -->|GET /tickers| TS
+    UI -->|POST /sp500-analysis\nPOST /stock-data\nGET /cache-info\nGET /ticker-changes| DS
+    UI -->|POST /optimize-portfolio\nPOST /portfolio-metrics| CS
+
+    %% ── Browser → UI ─────────────────────────────────────────────
+    BROWSER <-->|HTTP :8501| UI
+
+    %% ── Styling ──────────────────────────────────────────────────
+    classDef external  fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef job       fill:#fef9c3,stroke:#ca8a04,color:#422006
+    classDef service   fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef storage   fill:#f3e8ff,stroke:#9333ea,color:#3b0764
+    classDef shared    fill:#ffedd5,stroke:#ea580c,color:#431407
+    classDef infra     fill:#f1f5f9,stroke:#94a3b8,color:#1e293b
+    classDef browser   fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+
+    class WIKI,YAHOO external
+    class PS,AS,TV job
+    class TS,DS,CS,UI service
+    class CSV,PARQ,ANAL,VAL storage
+    class AE,PL,TP,M shared
+    class EP,CONTAINER,SVCS,CRON infra
+    class BROWSER browser

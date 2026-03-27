@@ -1,0 +1,49 @@
+---
+title: "Composite Scoring — Normalise then Weighted Sum"
+---
+flowchart TD
+    subgraph IN["Raw Metrics  (N tickers)"]
+        direction LR
+        AR["Annual_Return"]
+        VO["Volatility"]
+        SR["Sharpe_Ratio"]
+        DR["Max_Drawdown"]
+        MO["Recent_3M_Return"]
+    end
+
+    subgraph NORM["Step 1 — Normalise to 0..1"]
+        direction LR
+        NR["Return_Score\nrank(pct=True)\n↑ outlier-robust rank"]
+        NV["Vol_Score\n1 − norm(Volatility)\n↓ lower = better"]
+        NS["Sharpe_Score\nnorm(Sharpe_Ratio)\n↑ higher = better"]
+        ND["Drawdown_Score\nnorm(Max_Drawdown)\n↑ less negative = better"]
+        NM["Momentum_Score\nrank(pct=True)\n↑ outlier-robust rank"]
+    end
+
+    FORMULA["Step 2 — Weighted Sum\n─────────────────────────────────\nComposite_Score =\n  0.20 × Return_Score\n+ 0.15 × Vol_Score\n+ 0.25 × Sharpe_Score\n+ 0.20 × Drawdown_Score\n+ 0.20 × Momentum_Score\n─────────────────────────────────\nnorm(x) = (x − min) / (max − min)\nif range = 0  →  score = 0.5"]
+
+    RANK["Sort descending\nRank 1 = highest composite"]
+
+    AR --> NR
+    VO --> NV
+    SR --> NS
+    DR --> ND
+    MO --> NM
+
+    NR --> FORMULA
+    NV --> FORMULA
+    NS --> FORMULA
+    ND --> FORMULA
+    NM --> FORMULA
+
+    FORMULA --> RANK
+
+    classDef raw    fill:#f1f5f9,stroke:#94a3b8,color:#1e293b
+    classDef norm   fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef weight fill:#fef9c3,stroke:#ca8a04,color:#422006,font-weight:bold
+    classDef out    fill:#dcfce7,stroke:#16a34a,color:#14532d
+
+    class AR,VO,SR,DR,MO raw
+    class NR,NV,NS,ND,NM norm
+    class FORMULA weight
+    class RANK out

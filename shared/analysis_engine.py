@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from shared.config import DEFAULT_RISK_FREE_RATE
+
 
 def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Align cached data with the expected analyzer schema.
@@ -31,7 +33,7 @@ def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
         df['Annual_Return'] = df['Annual_Return'] / 100.0
     if 'Volatility' in df.columns and df['Volatility'].max() > 1:
         df['Volatility'] = df['Volatility'] / 100.0
-    if 'Max_Drawdown' in df.columns and df['Max_Drawdown'].min() > -1:
+    if 'Max_Drawdown' in df.columns and df['Max_Drawdown'].max() > 1:
         df['Max_Drawdown'] = -df['Max_Drawdown'] / 100.0
     return df
 
@@ -95,7 +97,7 @@ class AnalysisEngine:
         mean_log = daily_log.mean()
         ann_return = float(np.exp(mean_log * 252) - 1)
         ann_vol = float(returns.std() * np.sqrt(252))
-        sharpe = float(ann_return / ann_vol) if ann_vol > 0 else 0.0
+        sharpe = float((ann_return - DEFAULT_RISK_FREE_RATE) / ann_vol) if ann_vol > 0 else 0.0
         cumulative = (1 + returns).cumprod()
         if cumulative.empty:
             return None
@@ -127,17 +129,19 @@ class AnalysisEngine:
 
     def _append_scores(self, df: pd.DataFrame) -> pd.DataFrame:
         """Mirror the Streamlit composite scoring."""
-        df['Return_Score'] = self._safe_normalize(df['Annual_Return'])
+        # Percentile rank for fat-tailed metrics (outlier-robust)
+        df['Return_Score'] = df['Annual_Return'].rank(pct=True)
+        df['Momentum_Score'] = df['Recent_3M_Return'].rank(pct=True)
+        # Min-max for bounded metrics where outliers are rare
         df['Vol_Score'] = self._safe_normalize(df['Volatility'], inverse=True)
         df['Sharpe_Score'] = self._safe_normalize(df['Sharpe_Ratio'])
-        df['Drawdown_Score'] = self._safe_normalize(df['Max_Drawdown'], inverse=True)
-        df['Momentum_Score'] = self._safe_normalize(df['Recent_3M_Return'])
+        df['Drawdown_Score'] = self._safe_normalize(df['Max_Drawdown'])
         df['Composite_Score'] = (
-            0.25 * df['Return_Score'] +
-            0.20 * df['Vol_Score'] +
+            0.20 * df['Return_Score'] +
+            0.15 * df['Vol_Score'] +
             0.25 * df['Sharpe_Score'] +
-            0.15 * df['Drawdown_Score'] +
-            0.15 * df['Momentum_Score']
+            0.20 * df['Drawdown_Score'] +
+            0.20 * df['Momentum_Score']
         )
         df = df.sort_values('Composite_Score', ascending=False).reset_index(drop=True)
         return df

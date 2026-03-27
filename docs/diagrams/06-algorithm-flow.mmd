@@ -1,0 +1,44 @@
+---
+title: "End-to-End Algorithm Flow"
+---
+flowchart LR
+    subgraph SYNC["Weekly  —  Offline Jobs"]
+        direction TB
+        YF["Yahoo Finance\nraw OHLC"]
+        DS["Delta Sync\n_delta_sync()"]
+        PC["Price Cache\n*.parquet"]
+        AE["Analysis Engine\nanalysis_engine.py"]
+        AC["Analysis Cache\nsp500_analysis_*.parquet"]
+
+        YF -->|"batch download\ndelta only"| DS
+        DS -->|"merge + dedup\n+ trim"| PC
+        PC -->|"read price frame"| AE
+        AE -->|"metrics\n+ composite score"| AC
+    end
+
+    subgraph SESSION["On-Demand  —  User Session"]
+        direction TB
+        UI["Streamlit UI\nanalyst selects tickers"]
+        PF["Price slice\nfrom cache"]
+        OPT["Portfolio Optimiser\nEfficientFrontier"]
+        RES["Result\nweights + allocation\nexpected return\nsharpe ratio"]
+
+        UI -->|"POST /stock-data"| PF
+        PF -->|"prices_df"| OPT
+        OPT -->|"OptimizationResult"| RES
+        RES -->|"display"| UI
+    end
+
+    AC -->|"POST /sp500-analysis\nread parquet"| UI
+
+    classDef external fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef offline  fill:#fef9c3,stroke:#ca8a04,color:#422006
+    classDef cache    fill:#f3e8ff,stroke:#9333ea,color:#3b0764
+    classDef online   fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef ui       fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+
+    class YF external
+    class DS,AE offline
+    class PC,AC cache
+    class OPT,PF online
+    class UI,RES ui
