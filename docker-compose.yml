@@ -1,0 +1,19 @@
+services:
+  fin-portfolio:
+    build: .
+    ports:
+      - "${TICKER_PORT:-8000}:8000"
+      - "${DATA_PORT:-8001}:8001"
+      - "${CALC_PORT:-8002}:8002"
+      - "${UI_PORT:-8501}:8501"
+    volumes:
+      - ./sp500_data:/app/sp500_data
+    environment:
+      PORT: "${UI_PORT:-8501}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

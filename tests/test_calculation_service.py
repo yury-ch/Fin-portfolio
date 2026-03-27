@@ -9,11 +9,6 @@ import pandas as pd
 import numpy as np
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta
-import sys
-import os
-
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from services.calculation_service import CalculationService, app
 from shared.models import OptimizationResult, ServiceResponse
@@ -103,7 +98,8 @@ class TestCalculationService:
         """Test enforce_min_holdings with normal weights"""
         weights = pd.Series({'AAPL': 0.5, 'MSFT': 0.3, 'GOOGL': 0.15, 'TSLA': 0.05})
 
-        result = calculation_service.enforce_min_holdings(weights, min_n=3, prune_below_pct=0.1)
+        # prune_below_pct is in percent — 10 means 10%, which prunes TSLA at 5%
+        result = calculation_service.enforce_min_holdings(weights, min_n=3, prune_below_pct=10)
 
         # Should keep top 3 holdings and renormalize
         assert len(result) == 3
@@ -146,7 +142,8 @@ class TestCalculationService:
 
         # Mock EfficientFrontier
         mock_ef_instance = Mock()
-        mock_ef_instance.max_quadratic_utility.return_value = {'AAPL': 0.4, 'MSFT': 0.3, 'GOOGL': 0.3}
+        mock_ef_instance.max_sharpe.return_value = None
+        mock_ef_instance.clean_weights.return_value = {'AAPL': 0.4, 'MSFT': 0.3, 'GOOGL': 0.3}
         mock_ef_instance.portfolio_performance.return_value = (0.12, 0.18, 0.67)  # return, vol, sharpe
         mock_ef.return_value = mock_ef_instance
 
@@ -159,7 +156,15 @@ class TestCalculationService:
         mock_discrete_alloc.return_value = mock_da_instance
 
         result = calculation_service.optimize_portfolio(
-            tickers, sample_prices, investment_amount
+            prices=sample_prices[tickers],
+            objective="Max Sharpe",
+            risk_free=4.0,
+            target_return=10.0,
+            max_weight=30.0,
+            l2_reg=5.0,
+            min_weight_threshold=0.25,
+            min_holdings=3,
+            investment_amount=investment_amount,
         )
 
         assert isinstance(result, OptimizationResult)
@@ -305,7 +310,8 @@ class TestCalculationServiceAPI:
         }
 
         response = client.post("/optimize-portfolio", json=payload)
-        assert response.status_code == 400
+        # FastAPI returns 422 (Unprocessable Entity) for missing required Pydantic fields
+        assert response.status_code == 422
 
     @patch('services.calculation_service.calculation_service.calculate_portfolio_metrics')
     def test_portfolio_metrics_endpoint_success(self, mock_calculate, client, sample_prices_dict):

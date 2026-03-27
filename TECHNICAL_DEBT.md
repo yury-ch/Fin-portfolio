@@ -12,8 +12,8 @@ This document outlines the key areas of technical debt in the S&P 500 Portfolio 
 | 2 | Monolithic `app.py` still active | P1 | ✅ Completed |
 | 3 | Competing architectures | P2 | ✅ Direction decided |
 | 4 | Brittle service startup / no health checks | P2 | ✅ Resolved |
-| 5 | No docker-compose.yml | P2 | ⏳ Open |
-| 6 | Inefficient Dockerfile / no `.dockerignore` | P3 | ⏳ Open |
+| 5 | No docker-compose.yml | P2 | ✅ Resolved |
+| 6 | Inefficient Dockerfile / no `.dockerignore` | P3 | ✅ Resolved |
 | 7 | Hardcoded configuration | P3 | ⏳ Open |
 | 8 | Disorganized legacy data files | P3 | ✅ Partially resolved |
 | 9 | Unpinned dependencies | P3 | ⏳ Open |
@@ -38,6 +38,14 @@ The microservices stack (`services/presentation_service.py` + `ticker_service` +
 
 `docker-entrypoint.sh` now implements `wait_for_healthy()` — polls each service's `/health` endpoint before starting the Streamlit UI, with configurable retries and timeout. Services fail fast with a clear error if dependencies are unavailable.
 
+### 5. docker-compose.yml — added (was P2)
+
+`docker-compose.yml` created with a single `fin-portfolio` service. Defines all four port mappings with environment-variable overrides (`TICKER_PORT`, `DATA_PORT`, `CALC_PORT`, `UI_PORT`), a named volume mount for `sp500_data/` so the price/analysis cache persists across container restarts, `restart: unless-stopped`, and a `healthcheck` polling `data_service /health`. One-command startup: `docker compose up`.
+
+### 6. `.dockerignore` added / Dockerfile EXPOSE fixed (was P3)
+
+`.dockerignore` created excluding `.venv/`, `sp500_data/`, `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.git/`, and dev-only files (`requirements-test.txt`, `run_tests.py`, `test_*.py`). The `pip install` layer is now stable across source changes. `Dockerfile` EXPOSE updated from `8001 8002 8501` to `8000 8001 8002 8501` (ticker_service port was missing).
+
 ### 8. Disorganized legacy data files — partially resolved (was P3)
 
 `sp500_data/*.parquet` added to `.gitignore` — generated cache files are no longer tracked. Per-period parquet files (`prices_1y_1d.parquet`, etc.) are the authoritative price cache. Legacy `sp500_analysis.parquet` and `metadata.parquet` still exist on disk but are no longer referenced by the microservices stack.
@@ -45,25 +53,6 @@ The microservices stack (`services/presentation_service.py` + `ticker_service` +
 ---
 
 ## ⏳ Open — Next Steps (by priority)
-
-### P2 — Add `docker-compose.yml`
-
-**Action:** Create `docker-compose.yml` defining all four services with:
-- `depends_on` + `healthcheck` directives (replacing the shell polling in `docker-entrypoint.sh`)
-- Named volumes for `sp500_data/`
-- Environment variable overrides for ports and paths
-
-**Why:** Shell-based orchestration is fragile. `docker-compose` gives restart policies, log aggregation, and one-command startup (`docker compose up`).
-
----
-
-### P3 — Add `.dockerignore`
-
-**Action:** Create `.dockerignore` excluding `.venv`, `.git`, `sp500_data`, `__pycache__`, `*.pyc`, `.pytest_cache`.
-
-**Why:** The current `Dockerfile` copies the full context including the virtual environment and all cached data files. This bloats the image and invalidates layer caching on every run.
-
----
 
 ### P3 — Pin all dependencies
 
@@ -142,11 +131,13 @@ Forward-looking decisions that are not blocking but should inform future develop
 
 **Current:** Tests exist for `ticker_provider` and `calculation_service`. The following are untested:
 
-| Module | Risk |
-|---|---|
-| `price_sync_service.py` delta logic | Bug silently corrupts the price cache |
-| `data_service.py` endpoints | API contract breakage goes undetected |
-| `shared/price_loader.py` | Cache normalization edge cases |
-| `shared/analysis_engine.py` | Scoring formula regressions |
+| Module | Risk | Status |
+|---|---|---|
+| `price_sync_service.py` delta logic | Bug silently corrupts the price cache | ✅ `test_price_sync_service.py` (8 tests) |
+| `data_service.py` endpoints | API contract breakage goes undetected | ✅ `test_data_service.py` (24 tests) |
+| `shared/price_loader.py` | Cache normalization edge cases | ✅ `test_price_cache.py` |
+| `shared/analysis_engine.py` | Scoring formula regressions | ✅ `test_analysis_engine.py` |
 
-**Recommendation:** Prioritize tests for `price_sync_service._delta_sync()` — a merge bug there would produce wrong analysis results with no error message.
+**Bugs surfaced by tests:**
+- `price_sync_service._delta_sync`: `if last_ts is None` guard is dead code — `pd.DatetimeIndex([]).max()` returns `NaT`, not `None`. Low severity.
+- `data_service.POST /sp500-analysis`: broad `except Exception` swallows `HTTPException`, returning HTTP 200 `success=False` instead of the intended HTTP 503. Clients cannot distinguish "cache missing" from other errors. Fix: re-raise `HTTPException` before the generic except block.

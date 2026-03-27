@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Generated data cache — mounted as a volume at runtime
+sp500_data/
+
+# Git and IDE
+.git/
+.gitignore
+.DS_Store
+
+# Dev-only files
+requirements.txt
+requirements-test.txt
+run_tests.py
+tests/
+pytest.ini
+source/

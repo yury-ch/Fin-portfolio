@@ -46,11 +46,15 @@ After the initial sync, `data_service` will auto-seed the analysis cache on futu
 ### Docker
 
 ```bash
-docker build -t fin-portfolio .
-docker run -p 8501:8501 -p 8000:8000 -p 8001:8001 -p 8002:8002 fin-portfolio
+docker compose up          # build and start (foreground)
+docker compose up -d       # detached mode
+docker compose down        # stop and remove container
+docker compose logs -f     # follow logs
 ```
 
 Open **http://localhost:8501**. The container entrypoint waits for each service to pass its `/health` check before starting the next one.
+
+`sp500_data/` is mounted as a volume — price and analysis caches persist across container restarts. Override ports via environment variables (e.g. `UI_PORT=9501 docker compose up`).
 
 ## Service Endpoints
 

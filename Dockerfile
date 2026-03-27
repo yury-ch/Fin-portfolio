@@ -16,6 +16,6 @@ COPY . .
 
 RUN chmod +x docker-entrypoint.sh
 
-EXPOSE 8001 8002 8501
+EXPOSE 8000 8001 8002 8501
 
 ENTRYPOINT ["./docker-entrypoint.sh"]
