@@ -4,6 +4,7 @@ yfinance
 pandas
 numpy<2
 PyPortfolioOpt
+scikit-learn
 
 # Microservices additional dependencies
 fastapi
@@ -12,3 +13,4 @@ pydantic
 requests
 python-multipart
 lxml
+plotly

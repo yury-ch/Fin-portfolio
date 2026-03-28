@@ -77,3 +77,45 @@ class StockMetrics(BaseModel):
     composite_score: float
     current_price: float
     additional_fields: Optional[Dict[str, Any]] = None
+
+
+class ForecastRequest(BaseModel):
+    """Request model for return forecasts"""
+    tickers: List[str]
+    prices_data: Dict[str, Dict[str, float]]
+    top_n: int = 10
+    n_simulations: int = 1000
+    risk_free_annual: float = 0.04
+    spy_ticker: str = "SPY"
+
+
+class TickerForecast(BaseModel):
+    """Forecast results for a single ticker"""
+    ticker: str
+    current_price: float
+    # Monte Carlo
+    mc_return_1y: Optional[float] = None
+    mc_return_2y: Optional[float] = None
+    mc_p10_1y: Optional[float] = None
+    mc_p90_1y: Optional[float] = None
+    mc_p10_2y: Optional[float] = None
+    mc_p90_2y: Optional[float] = None
+    mc_paths_sample: Optional[List[List[float]]] = None  # 10 paths x 504 days
+    # CAPM
+    beta: Optional[float] = None
+    capm_return_1y: Optional[float] = None
+    capm_return_2y: Optional[float] = None
+    # Trend
+    trend_return_1y: Optional[float] = None
+    trend_return_2y: Optional[float] = None
+    # Ensemble
+    ensemble_return_1y: Optional[float] = None
+    ensemble_return_2y: Optional[float] = None
+
+
+class ForecastResult(BaseModel):
+    """Full forecast response"""
+    forecasts: List[TickerForecast]
+    n_simulations: int
+    risk_free_annual: float
+    generated_at: datetime = datetime.now()

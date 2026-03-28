@@ -138,8 +138,10 @@ class ServiceClient:
             }
             response = requests.post(f"{DATA_SERVICE_URL}/sp500-analysis", json=payload, timeout=600)
             data = response.json()
+            if not response.ok:
+                raise RuntimeError(data.get("detail") or data.get("error") or f"HTTP {response.status_code}")
             if not data.get("success"):
-                raise RuntimeError(data.get("error", "Unknown analysis error"))
+                raise RuntimeError(data.get("error") or "Unknown analysis error")
             content = data.get("data", {})
             df = pd.DataFrame(content.get("records", []))
             df = standardize_analysis_columns(df)
@@ -251,6 +253,39 @@ class ServiceClient:
             st.error(f"Optimization call failed: {exc}")
             return None
 
+    def get_forecast(
+        self,
+        tickers: List[str],
+        prices: pd.DataFrame,
+        risk_free_pct: float = 4.0,
+        n_simulations: int = 1000,
+    ) -> Optional[dict]:
+        """Call /forecast-returns on the calculation service."""
+        try:
+            payload = {
+                "tickers": tickers,
+                "prices_data": {
+                    str(idx): {col: float(val) for col, val in row.items()}
+                    for idx, row in prices.round(6).iterrows()
+                },
+                "top_n": len(tickers),
+                "n_simulations": n_simulations,
+                "risk_free_annual": risk_free_pct / 100.0,
+                "spy_ticker": "SPY",
+            }
+            response = requests.post(
+                f"{CALCULATION_SERVICE_URL}/forecast-returns",
+                json=payload,
+                timeout=180,
+            )
+            data = response.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Forecast service error"))
+            return data.get("data")
+        except Exception as exc:
+            st.error(f"Forecast call failed: {exc}")
+            return None
+
 
 # ── App bootstrap ────────────────────────────────────────────────────────────
 
@@ -270,6 +305,8 @@ _STATE_DEFAULTS = {
     'optimization_prices': None,
     'health_data': None,
     'universe_changes': None,
+    'forecast_result': None,
+    'forecast_prices': None,
 }
 for key, default in _STATE_DEFAULTS.items():
     if key not in st.session_state:
@@ -336,11 +373,12 @@ def get_analysis(period: str, force_refresh: bool = False) -> Tuple[pd.DataFrame
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab_analyzer, tab_optimizer, tab_health, tab_universe = st.tabs([
+tab_analyzer, tab_optimizer, tab_health, tab_universe, tab_forecast = st.tabs([
     "🔍 S&P 500 Stock Analyzer",
     "📊 Portfolio Optimizer",
     "📋 Data Health",
     "🔄 Universe Changes",
+    "🔮 Forecast",
 ])
 
 # ── Tab: Stock Analyzer ──────────────────────────────────────────────────────
@@ -1018,3 +1056,194 @@ with tab_universe:
             "No changes detected yet. "
             "Run `python services/ticker_validation_service.py` to populate history."
         )
+
+# ── Tab: Forecast ─────────────────────────────────────────────────────────────
+
+def _render_forecast_results(forecasts: list, fc_meta: dict) -> None:
+    """Render the full Forecast tab output."""
+    try:
+        import plotly.graph_objects as go
+        has_plotly = True
+    except ImportError:
+        has_plotly = False
+
+    # ── Ensemble summary ──────────────────────────────────────────────────────
+    st.subheader("📊 Ensemble Forecast Summary")
+    st.caption(
+        f"Based on {fc_meta.get('n_simulations', '?'):,} simulations per ticker  |  "
+        f"Risk-free rate: {fc_meta.get('risk_free_annual', 0) * 100:.2f}%"
+    )
+
+    def _pct(val):
+        return f"{val * 100:.1f}%" if val is not None else "—"
+
+    summary_rows = [
+        {
+            "Ticker": fc["ticker"],
+            "Price": f"${fc['current_price']:.2f}",
+            "Ens. 1Y": _pct(fc.get("ensemble_return_1y")),
+            "Ens. 2Y": _pct(fc.get("ensemble_return_2y")),
+            "MC 1Y (p50)": _pct(fc.get("mc_return_1y")),
+            "MC p90": _pct(fc.get("mc_p90_1y")),
+            "MC p10": _pct(fc.get("mc_p10_1y")),
+            "CAPM 1Y": _pct(fc.get("capm_return_1y")),
+            "Beta": f"{fc['beta']:.2f}" if fc.get("beta") is not None else "—",
+            "Trend 1Y": _pct(fc.get("trend_return_1y")),
+        }
+        for fc in forecasts
+    ]
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    # ── Method comparison 1Y ──────────────────────────────────────────────────
+    st.subheader("📋 Method Comparison — 1-Year Forecast")
+    st.dataframe(pd.DataFrame([
+        {
+            "Ticker": fc["ticker"],
+            "MC (median)": _pct(fc.get("mc_return_1y")),
+            "CAPM": _pct(fc.get("capm_return_1y")),
+            "Trend": _pct(fc.get("trend_return_1y")),
+            "Ensemble": _pct(fc.get("ensemble_return_1y")),
+        }
+        for fc in forecasts
+    ]), use_container_width=True, hide_index=True)
+
+    # ── Method comparison 2Y ──────────────────────────────────────────────────
+    with st.expander("📋 Method Comparison — 2-Year Forecast", expanded=False):
+        st.dataframe(pd.DataFrame([
+            {
+                "Ticker": fc["ticker"],
+                "MC (median)": _pct(fc.get("mc_return_2y")),
+                "CAPM": _pct(fc.get("capm_return_2y")),
+                "Trend": _pct(fc.get("trend_return_2y")),
+                "Ensemble": _pct(fc.get("ensemble_return_2y")),
+            }
+            for fc in forecasts
+        ]), use_container_width=True, hide_index=True)
+
+    # ── Fan charts ────────────────────────────────────────────────────────────
+    st.subheader("📈 Monte Carlo Fan Charts — Top 5 Tickers")
+    st.caption(
+        "10 representative paths spanning the p10–p90 range of simulated outcomes. "
+        "Shaded band = p10 to p90. Dashed line = current price. Dotted line = 1Y mark."
+    )
+
+    fan_tickers = forecasts[:5]
+    fan_cols = st.columns(min(len(fan_tickers), 3))
+
+    for i, fc in enumerate(fan_tickers):
+        paths = fc.get("mc_paths_sample")
+        if not paths:
+            continue
+        col = fan_cols[i % 3]
+        with col:
+            if has_plotly:
+                import numpy as np
+                paths_arr = np.array(paths)
+                x_days = list(range(paths_arr.shape[1]))
+                fig = go.Figure()
+                for path in paths_arr:
+                    fig.add_trace(go.Scatter(
+                        x=x_days, y=path.tolist(), mode="lines",
+                        line=dict(width=0.8, color="steelblue"), opacity=0.35, showlegend=False,
+                    ))
+                fig.add_trace(go.Scatter(
+                    x=x_days + x_days[::-1],
+                    y=paths_arr[9].tolist() + paths_arr[0].tolist()[::-1],
+                    fill="toself", fillcolor="rgba(70,130,180,0.12)",
+                    line=dict(color="rgba(0,0,0,0)"), showlegend=False,
+                ))
+                fig.add_trace(go.Scatter(
+                    x=x_days, y=paths_arr[4].tolist(), mode="lines",
+                    line=dict(width=2.5, color="steelblue"), showlegend=False,
+                ))
+                fig.add_hline(
+                    y=fc["current_price"], line_dash="dash", line_color="grey",
+                    annotation_text=f"Now: ${fc['current_price']:.0f}",
+                )
+                fig.add_vline(x=252, line_dash="dot", line_color="orange", annotation_text="1Y")
+                fig.update_layout(
+                    title=fc["ticker"], xaxis_title="Trading days", yaxis_title="Price ($)",
+                    height=320, margin=dict(l=30, r=10, t=40, b=30),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                # Fallback: simple line chart of median path
+                import numpy as np
+                paths_arr = np.array(paths)
+                st.line_chart(
+                    pd.DataFrame({"price": paths_arr[4]},
+                                 index=range(paths_arr.shape[1])),
+                    use_container_width=True,
+                )
+                st.caption(f"{fc['ticker']} — install plotly for full fan chart")
+
+    # ── Download ──────────────────────────────────────────────────────────────
+    flat = [{k: v for k, v in fc.items() if k != "mc_paths_sample"} for fc in forecasts]
+    st.download_button(
+        "📥 Download Forecast Data (CSV)",
+        data=pd.DataFrame(flat).to_csv(index=False).encode("utf-8"),
+        file_name="forecast_results.csv",
+        mime="text/csv",
+    )
+
+
+with tab_forecast:
+    st.header("🔮 Return Forecast — Top Performers")
+    st.caption(
+        "Ensemble forecast blending Monte Carlo GBM, CAPM, and log-linear trend regression. "
+        "Statistical projections only — not investment advice."
+    )
+
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    with fc1:
+        forecast_period = st.selectbox("Lookback period", ANALYSIS_PERIODS, index=0, key="fc_period")
+    with fc2:
+        forecast_top_n = st.slider("Top N stocks", min_value=3, max_value=20, value=10, key="fc_top_n")
+    with fc3:
+        forecast_rf = st.number_input("Risk-free rate (annual %)", value=4.0, step=0.25, key="fc_rf")
+    with fc4:
+        forecast_simulations = st.select_slider(
+            "Simulations", options=[500, 1000, 2000, 5000], value=1000, key="fc_sims"
+        )
+
+    if st.button("🚀 Run Forecast", type="primary", use_container_width=True, key="fc_run"):
+        st.session_state["forecast_result"] = None
+        st.session_state["forecast_prices"] = None
+
+        with st.spinner("Loading top performers…"):
+            analysis_df, _ = get_analysis(forecast_period, force_refresh=False)
+
+        if analysis_df is None or analysis_df.empty:
+            st.error("No analysis data available. Run the S&P 500 Analyzer first.")
+        else:
+            top_tickers = analysis_df["Ticker"].head(forecast_top_n).tolist()
+            price_tickers = list(dict.fromkeys(top_tickers + ["SPY"]))
+
+            with st.spinner(f"Fetching prices for {len(price_tickers)} tickers…"):
+                prices_df = client.get_stock_data(price_tickers, forecast_period, "1d")
+
+            if prices_df.empty:
+                st.error("No price data returned.")
+            else:
+                st.session_state["forecast_prices"] = prices_df
+                with st.spinner(
+                    f"Running {forecast_simulations:,} Monte Carlo simulations per ticker…"
+                ):
+                    result = client.get_forecast(
+                        tickers=top_tickers,
+                        prices=prices_df,
+                        risk_free_pct=forecast_rf,
+                        n_simulations=forecast_simulations,
+                    )
+                if result:
+                    st.session_state["forecast_result"] = result
+                else:
+                    st.error("Forecast computation failed.")
+
+    fc_result = st.session_state.get("forecast_result")
+    if fc_result:
+        forecasts_list = fc_result.get("forecasts", [])
+        if forecasts_list:
+            _render_forecast_results(forecasts_list, fc_result)
+        else:
+            st.warning("No forecasts returned.")

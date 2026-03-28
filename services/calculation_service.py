@@ -16,7 +16,8 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.models import (
-    PortfolioOptimizationRequest, ServiceResponse, OptimizationResult
+    PortfolioOptimizationRequest, ServiceResponse, OptimizationResult,
+    ForecastRequest, ForecastResult, TickerForecast,
 )
 from shared.config import DEFAULT_RISK_FREE_RATE
 
@@ -45,11 +46,11 @@ class CalculationService:
     def compute_stats(self, prices: pd.DataFrame) -> Tuple[pd.Series, pd.DataFrame]:
         """Compute expected returns and covariance matrix from price data"""
         try:
-            # Calculate expected returns using mean historical return
-            mu = expected_returns.mean_historical_return(prices, frequency=252)
-            
-            # Calculate covariance matrix
-            S = risk_models.sample_cov(prices, frequency=252)
+            # Geometric (log-return) mean — consistent with analysis_engine screening
+            mu = expected_returns.mean_historical_return(prices, compounding=True, frequency=252)
+
+            # Ledoit-Wolf shrinkage — more stable than sample covariance for N > 20
+            S = risk_models.CovarianceShrinkage(prices, frequency=252).ledoit_wolf()
             
             return mu, S
             
@@ -165,9 +166,163 @@ class CalculationService:
             logger.error(f"Error calculating portfolio metrics: {e}")
             raise
 
+class ForecastService:
+    """Monte Carlo GBM, CAPM, and log-linear trend forecasts for top-N tickers."""
+
+    _TRADING_DAYS_1Y: int = 252
+    _TRADING_DAYS_2Y: int = 504
+
+    # Cap annualised drift at ±50 % — prevents extrapolating a single lucky year
+    # into indefinite compounding.  50 % is already extremely bullish for a forecast.
+    _MAX_ANNUAL_RETURN: float = 0.50
+    _MIN_ANNUAL_RETURN: float = -0.90
+
+    def __init__(self, rng_seed: Optional[int] = None):
+        self._rng = np.random.default_rng(rng_seed)
+
+    def forecast(
+        self,
+        prices: pd.DataFrame,
+        tickers: List[str],
+        n_simulations: int,
+        risk_free_annual: float,
+        spy_ticker: str,
+    ) -> List[dict]:
+        prices = prices.copy()
+        prices.index = pd.to_datetime(prices.index)
+        prices = prices.sort_index()
+
+        spy_returns = None
+        if spy_ticker in prices.columns:
+            spy_series = prices[spy_ticker].dropna()
+            if len(spy_series) >= 30:
+                spy_returns = spy_series.pct_change().dropna().values
+
+        results = []
+        for ticker in tickers:
+            if ticker not in prices.columns:
+                continue
+            series = prices[ticker].dropna()
+            if len(series) < 63:
+                continue
+
+            stock_returns_aligned = None
+            spy_returns_aligned = None
+            if spy_returns is not None and spy_ticker in prices.columns:
+                aligned = prices[[ticker, spy_ticker]].dropna()
+                stock_ret = aligned[ticker].pct_change().dropna()
+                spy_ret = aligned[spy_ticker].pct_change().dropna()
+                stock_returns_aligned = stock_ret.values
+                spy_returns_aligned = spy_ret.values
+
+            mc = self._mc_forecast(series, n_simulations)
+            cap = self._capm_forecast(
+                stock_returns_aligned, spy_returns_aligned, risk_free_annual
+            ) if stock_returns_aligned is not None else {}
+            trd = self._trend_forecast(series)
+
+            ens_1y = self._ensemble([
+                mc.get('mc_return_1y'), cap.get('capm_return_1y'), trd.get('trend_return_1y'),
+            ])
+            ens_2y = self._ensemble([
+                mc.get('mc_return_2y'), cap.get('capm_return_2y'), trd.get('trend_return_2y'),
+            ])
+
+            results.append(dict(
+                ticker=ticker,
+                current_price=float(series.iloc[-1]),
+                **mc, **cap, **trd,
+                ensemble_return_1y=ens_1y,
+                ensemble_return_2y=ens_2y,
+            ))
+
+        return results
+
+    def _mc_forecast(self, prices: pd.Series, n_simulations: int) -> dict:
+        log_returns = np.log(prices / prices.shift(1)).dropna().values
+        mu_daily = log_returns.mean()
+        sigma_daily = log_returns.std(ddof=1)
+        if sigma_daily == 0:
+            return {}
+
+        # Clamp daily drift so the implied annualised return stays within
+        # [_MIN_ANNUAL_RETURN, _MAX_ANNUAL_RETURN].  Without this, a single
+        # exceptional year (e.g. +400 %) drives the median path into the thousands.
+        max_daily = np.log(1 + self._MAX_ANNUAL_RETURN) / self._TRADING_DAYS_1Y
+        min_daily = np.log(1 + self._MIN_ANNUAL_RETURN) / self._TRADING_DAYS_1Y
+        mu_daily = float(np.clip(mu_daily, min_daily, max_daily))
+
+        drift = mu_daily - 0.5 * sigma_daily ** 2
+        T = self._TRADING_DAYS_2Y
+        P0 = float(prices.iloc[-1])
+
+        Z = self._rng.standard_normal((n_simulations, T))
+        log_paths = np.cumsum(drift + sigma_daily * Z, axis=1)
+        price_paths = P0 * np.exp(log_paths)
+
+        terminal_1y = price_paths[:, self._TRADING_DAYS_1Y - 1]
+        terminal_2y = price_paths[:, self._TRADING_DAYS_2Y - 1]
+
+        # Select 10 fan paths at evenly-spaced quantiles of 2Y terminal distribution
+        quantile_indices = np.argsort(terminal_2y)[
+            np.linspace(0, n_simulations - 1, 10).astype(int)
+        ]
+
+        return dict(
+            mc_return_1y=float(np.median(terminal_1y) / P0 - 1),
+            mc_return_2y=float(np.median(terminal_2y) / P0 - 1),
+            mc_p10_1y=float(np.percentile(terminal_1y, 10) / P0 - 1),
+            mc_p90_1y=float(np.percentile(terminal_1y, 90) / P0 - 1),
+            mc_p10_2y=float(np.percentile(terminal_2y, 10) / P0 - 1),
+            mc_p90_2y=float(np.percentile(terminal_2y, 90) / P0 - 1),
+            mc_paths_sample=price_paths[quantile_indices, :].tolist(),
+        )
+
+    def _capm_forecast(
+        self,
+        returns_stock: np.ndarray,
+        returns_spy: np.ndarray,
+        risk_free_annual: float,
+    ) -> dict:
+        if returns_spy is None or len(returns_spy) < 30:
+            return {}
+        cov_matrix = np.cov(returns_stock, returns_spy, ddof=1)
+        beta = float(cov_matrix[0, 1] / cov_matrix[1, 1])
+        spy_cumulative = float(np.prod(1 + returns_spy))
+        n_years = len(returns_spy) / 252.0
+        e_market = spy_cumulative ** (1.0 / n_years) - 1
+        capm_1y = risk_free_annual + beta * (e_market - risk_free_annual)
+        capm_1y = float(np.clip(capm_1y, self._MIN_ANNUAL_RETURN, self._MAX_ANNUAL_RETURN))
+        return dict(
+            beta=beta,
+            capm_return_1y=capm_1y,
+            capm_return_2y=float((1 + capm_1y) ** 2 - 1),
+        )
+
+    def _trend_forecast(self, prices: pd.Series) -> dict:
+        log_prices = np.log(prices.values.astype(float))
+        x = np.arange(len(log_prices), dtype=float)
+        coeffs = np.polyfit(x, log_prices, deg=1)
+        daily_rate = float(coeffs[0])
+        # Clamp daily rate to the same annual bounds used by MC
+        max_daily = np.log(1 + self._MAX_ANNUAL_RETURN) / self._TRADING_DAYS_1Y
+        min_daily = np.log(1 + self._MIN_ANNUAL_RETURN) / self._TRADING_DAYS_1Y
+        daily_rate = float(np.clip(daily_rate, min_daily, max_daily))
+        return dict(
+            trend_return_1y=float(np.exp(daily_rate * self._TRADING_DAYS_1Y) - 1),
+            trend_return_2y=float(np.exp(daily_rate * self._TRADING_DAYS_2Y) - 1),
+        )
+
+    @staticmethod
+    def _ensemble(values: List[Optional[float]]) -> Optional[float]:
+        valid = [v for v in values if v is not None and not np.isnan(v)]
+        return float(np.mean(valid)) if valid else None
+
+
 # Initialize FastAPI app
 app = FastAPI(title="Calculation Service", description="Portfolio optimization and statistical calculations")
 calculation_service = CalculationService()
+forecast_service = ForecastService()
 
 @app.get("/health")
 async def health_check():
@@ -256,6 +411,49 @@ async def compute_statistics(prices_data: dict):
             success=False,
             error=str(e)
         )
+
+@app.post("/forecast-returns")
+async def forecast_returns(request: ForecastRequest):
+    """
+    Compute 1Y and 2Y return forecasts for specified tickers using an ensemble
+    of Monte Carlo GBM, CAPM, and log-linear trend regression.
+    Include SPY in prices_data for CAPM beta calculation.
+    """
+    try:
+        if not request.tickers or not request.prices_data:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required parameters: tickers and prices_data"
+            )
+
+        prices_df = pd.DataFrame.from_dict(request.prices_data, orient='index')
+        prices_df.index = pd.to_datetime(prices_df.index)
+        prices_df = prices_df.sort_index()
+        prices_df = prices_df.apply(pd.to_numeric, errors='coerce')
+        prices_df = prices_df.ffill().dropna(how='all')
+
+        raw_results = forecast_service.forecast(
+            prices=prices_df,
+            tickers=request.tickers,
+            n_simulations=request.n_simulations,
+            risk_free_annual=request.risk_free_annual,
+            spy_ticker=request.spy_ticker,
+        )
+
+        result = ForecastResult(
+            forecasts=[TickerForecast(**r) for r in raw_results],
+            n_simulations=request.n_simulations,
+            risk_free_annual=request.risk_free_annual,
+        )
+
+        return ServiceResponse(success=True, data=result.dict())
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in forecast_returns: {e}")
+        return ServiceResponse(success=False, error=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -358,6 +358,8 @@ async def get_sp500_analysis(request: StockAnalysisRequest):
                 "metadata": data_service.format_metadata_for_response(metadata)
             }
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in get_sp500_analysis: {e}")
         return ServiceResponse(
