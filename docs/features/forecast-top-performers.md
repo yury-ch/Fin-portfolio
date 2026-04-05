@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | ID | F-01 |
-| Status | Planned |
+| Status | Shipped |
 | Priority | P2 |
 | Owner | — |
 | Created | 2026-03-28 |

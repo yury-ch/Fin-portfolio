@@ -14,7 +14,7 @@ This document outlines the key areas of technical debt in the S&P 500 Portfolio 
 | 4 | Brittle service startup / no health checks | P2 | ✅ Resolved |
 | 5 | No docker-compose.yml | P2 | ✅ Resolved |
 | 6 | Inefficient Dockerfile / no `.dockerignore` | P3 | ✅ Resolved |
-| 7 | Hardcoded configuration | P3 | ⏳ Open |
+| 7 | Hardcoded configuration | P3 | ✅ Resolved (F-05) |
 | 8 | Disorganized legacy data files | P3 | ✅ Partially resolved |
 | 9 | Unpinned dependencies | P3 | ⏳ Open |
 | 10 | Drawdown score inversion — worst stocks rank highest | **P1** | ✅ Resolved |
@@ -24,7 +24,14 @@ This document outlines the key areas of technical debt in the S&P 500 Portfolio 
 | 14 | Min-max outlier collapse in composite scoring | P2 | ✅ Resolved |
 | 15 | Arithmetic vs. log return inconsistency (screening vs. optimiser) | P3 | ✅ Resolved |
 | 16 | Sample covariance unstable for large N — no shrinkage | P3 | ✅ Resolved |
-| 17 | 3-month momentum suboptimal lookback | P3 | ⏳ Open |
+| 17 | 3-month momentum suboptimal lookback | P3 | ✅ Resolved (F-04) |
+| 18 | Pydantic `.dict()` deprecation | P3 | ✅ Resolved |
+| 19 | `HTTPException` swallowed in `/sp500-analysis` | P1 | ✅ Resolved |
+| 20 | pandas `read_html` FutureWarning (literal string) | P3 | ✅ Resolved |
+| 21 | UX inconsistencies in presentation_service.py (11 items) | P2 | ✅ Resolved |
+| 22 | `compute-stats` / `portfolio-metrics` DataFrame transposition bug | P2 | ✅ Resolved |
+| 23 | No end-to-end tests — unit tests mock all cross-service calls | P2 | ✅ Resolved (F-10) |
+| 24 | Claude Code project commands lacked YAML frontmatter | P3 | ✅ Resolved |
 
 ---
 
@@ -88,6 +95,40 @@ Since Sharpe = Return / Volatility, the original weights (25% Return + 25% Sharp
 
 ---
 
+### 17. 3-month momentum suboptimal lookback — replaced with 12M (was P3)
+
+`analysis_engine.py` now computes `Recent_12M_Return` using a 252-day lookback (Jegadeesh & Titman 12-1M signal). The 3-month window is retained alongside it. Feature F-04.
+
+### 18. Pydantic `.dict()` deprecation — fixed (was P3)
+
+`calculation_service.py` (lines 371, 461) and `data_service.py` (line 378): replaced `.dict()` with `.model_dump()` to silence Pydantic v2 deprecation warnings.
+
+### 19. `HTTPException` swallowed in `/sp500-analysis` — fixed (was P1)
+
+`data_service.py` broad `except Exception` was catching `HTTPException` before it could propagate, returning HTTP 200 `success=False` instead of the intended 503. Fixed by adding `except HTTPException: raise` before the generic handler. Test updated to assert `r.status_code == 503`.
+
+### 20. pandas `read_html` FutureWarning — fixed (was P3)
+
+`shared/ticker_provider.py`: `pd.read_html(response.text)` → `pd.read_html(io.StringIO(response.text))`.
+
+### 21. UX inconsistencies — resolved (was P2)
+
+11 UX findings across `services/presentation_service.py` identified and fixed. See `docs/ux-review.md` for full detail.
+
+### 22. `compute-stats` / `portfolio-metrics` DataFrame transposition — fixed (was P2)
+
+Both endpoints called `pd.DataFrame(prices_data)` on input shaped `{ date → { ticker → price } }`. Pandas interprets the outer-dict keys as column labels, producing a DataFrame with **tickers as index and dates as columns** — the transpose of what PyPortfolioOpt expects. As a result, `compute_stats()` returned expected-return values keyed by date strings instead of ticker symbols. Fixed in both endpoints: `pd.DataFrame.from_dict(prices_data, orient='index')` followed by `pd.to_datetime()` on the index. Discovered by the e2e test suite (F-10); `/optimize-portfolio` was already correct.
+
+### 23. No end-to-end tests — added (was P2)
+
+`tests/e2e/` created with 33 tests across 8 classes. Tests exercise real live service processes (no mocking), synthetic GBM price data for calculation-service tests (no Yahoo Finance dependency), a `@pytest.mark.network` marker for tests that need real market data, and a session-scoped fixture that auto-starts services if they aren't running. Key scenario: Forecast → Optimizer bridge validates the multi-service `expected_returns_override` workflow end-to-end. See F-10.
+
+### 24. Claude Code project commands lacked YAML frontmatter — fixed (was P3)
+
+`.claude/commands/*.md` files require a `---\nname: ...\ndescription: ...\n---` frontmatter block to appear in the `/` command menu. All five commands (`test`, `status`, `debt`, `sync`, `features`) have been updated.
+
+---
+
 ## ⏳ Open — Next Steps (by priority)
 
 ### P3 — Pin all dependencies
@@ -98,21 +139,11 @@ Since Sharpe = Return / Volatility, the original weights (25% Return + 25% Sharp
 
 ---
 
-### P3 — Centralized configuration
+### P3 — Pin all dependencies (item 9)
 
-**Action:** Replace hardcoded service URLs (`localhost:8000/8001/8002`) and file paths in `presentation_service.py` and `data_service.py` with environment variables loaded via `pydantic BaseSettings`.
+**Action:** Promote `requirements-lock.txt` as the Dockerfile install source (currently the Dockerfile installs from `requirements-microservices.txt`, which has floating versions).
 
-**Why:** Ports and hosts cannot be changed without editing source code. Required for any non-local deployment.
-
----
-
-### P3 — 3-month momentum suboptimal lookback
-
-**Location:** `analysis_engine.py:105–108`
-
-The 63-day (≈3M) window is shorter than the academically validated 12-1 month signal (Jegadeesh & Titman). The trailing 1-month period exhibits short-term reversal; including it degrades signal quality. A 3M window also increases sensitivity to earnings-announcement noise.
-
-**Improvement:** Add `Recent_12M_Return = prices.iloc[-1] / prices.iloc[-252] − 1` alongside the 3M metric and validate which lookback (or combination) produces higher quintile spread in backtests against the current universe.
+**Why:** Builds are not reproducible. A `yfinance` or `streamlit` major release could silently break the application.
 
 ---
 
@@ -183,7 +214,9 @@ Forward-looking decisions that are not blocking but should inform future develop
 | `data_service.py` endpoints | API contract breakage goes undetected | ✅ `test_data_service.py` (24 tests) |
 | `shared/price_loader.py` | Cache normalization edge cases | ✅ `test_price_cache.py` |
 | `shared/analysis_engine.py` | Scoring formula regressions | ✅ `test_analysis_engine.py` |
+| Service-to-service integration | Unit tests mock everything; cross-service contract breaks go undetected | ✅ `tests/e2e/` (33 tests) — see F-10 |
 
 **Bugs surfaced by tests:**
 - `price_sync_service._delta_sync`: `if last_ts is None` guard is dead code — `pd.DatetimeIndex([]).max()` returns `NaT`, not `None`. Low severity.
 - `data_service.POST /sp500-analysis`: broad `except Exception` swallows `HTTPException`, returning HTTP 200 `success=False` instead of the intended HTTP 503. Clients cannot distinguish "cache missing" from other errors. Fix: re-raise `HTTPException` before the generic except block.
+- `calculation_service /compute-stats` and `/portfolio-metrics`: `pd.DataFrame(prices_data)` produced a transposed DataFrame (tickers as index, dates as columns), causing PyPortfolioOpt to compute expected returns keyed by date instead of ticker. Fixed by switching to `pd.DataFrame.from_dict(prices_data, orient='index')`. Surfaced by the e2e suite (F-10).

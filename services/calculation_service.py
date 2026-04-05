@@ -15,6 +15,7 @@ import os
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from pydantic import BaseModel
 from shared.models import (
     PortfolioOptimizationRequest, ServiceResponse, OptimizationResult,
     ForecastRequest, ForecastResult, TickerForecast,
@@ -49,9 +50,13 @@ class CalculationService:
             # Geometric (log-return) mean — consistent with analysis_engine screening
             mu = expected_returns.mean_historical_return(prices, compounding=True, frequency=252)
 
+            # Clip to [-90%, +150%] — prevents corporate-action price spikes (e.g. SNDK
+            # re-listing) or extreme single-year outliers from dominating the optimizer.
+            mu = mu.clip(lower=-0.90, upper=1.50)
+
             # Ledoit-Wolf shrinkage — more stable than sample covariance for N > 20
             S = risk_models.CovarianceShrinkage(prices, frequency=252).ledoit_wolf()
-            
+
             return mu, S
             
         except Exception as e:
@@ -79,12 +84,23 @@ class CalculationService:
         min_weight_threshold: float,
         min_holdings: int,
         investment_amount: float,
+        expected_returns_override: Optional[Dict[str, float]] = None,
     ) -> OptimizationResult:
         """Optimize portfolio using the same settings as the monolith app."""
         if prices.empty or len(prices.columns) < 2:
             raise HTTPException(status_code=400, detail="Insufficient price data for optimization")
-        
+
         mu, S = self.compute_stats(prices)
+
+        # Apply forecast overrides: replace historical mu with caller-supplied
+        # ensemble return estimates for tickers present in both sources.
+        if expected_returns_override:
+            override = pd.Series(expected_returns_override)
+            common = mu.index.intersection(override.index)
+            if not common.empty:
+                mu = mu.copy()
+                mu[common] = override[common]
+
         n_assets = len(prices.columns)
         if n_assets <= 3:
             ef = EfficientFrontier(mu, S, weight_bounds=(0, 1))
@@ -227,6 +243,12 @@ class ForecastService:
             ens_2y = self._ensemble([
                 mc.get('mc_return_2y'), cap.get('capm_return_2y'), trd.get('trend_return_2y'),
             ])
+            # Clip ensemble to same bounds as individual components — MC median
+            # can float slightly above the drift cap due to the volatility term.
+            if ens_1y is not None:
+                ens_1y = float(np.clip(ens_1y, self._MIN_ANNUAL_RETURN, self._MAX_ANNUAL_RETURN))
+            if ens_2y is not None:
+                ens_2y = float(np.clip(ens_2y, self._MIN_ANNUAL_RETURN - 0.10, (1 + self._MAX_ANNUAL_RETURN) ** 2 - 1))
 
             results.append(dict(
                 ticker=ticker,
@@ -351,12 +373,13 @@ async def optimize_portfolio(request: PortfolioOptimizationRequest):
             l2_reg=request.l2_reg,
             min_weight_threshold=request.min_weight_threshold,
             min_holdings=request.min_holdings,
-            investment_amount=request.investment_amount
+            investment_amount=request.investment_amount,
+            expected_returns_override=request.expected_returns_override,
         )
         
         return ServiceResponse(
             success=True,
-            data=result.dict()
+            data=result.model_dump()
         )
         
     except HTTPException as http_exc:
@@ -373,8 +396,9 @@ async def optimize_portfolio(request: PortfolioOptimizationRequest):
 async def calculate_metrics(prices_data: dict, weights: Dict[str, float]):
     """Calculate portfolio metrics given prices and weights"""
     try:
-        # Convert prices data back to DataFrame
-        prices_df = pd.DataFrame(prices_data)
+        # Convert prices data back to DataFrame (orient='index' → dates as rows, tickers as cols)
+        prices_df = pd.DataFrame.from_dict(prices_data, orient='index')
+        prices_df.index = pd.to_datetime(prices_df.index)
         
         metrics = calculation_service.calculate_portfolio_metrics(prices_df, weights)
         
@@ -393,8 +417,9 @@ async def calculate_metrics(prices_data: dict, weights: Dict[str, float]):
 async def compute_statistics(prices_data: dict):
     """Compute expected returns and covariance matrix"""
     try:
-        # Convert prices data back to DataFrame  
-        prices_df = pd.DataFrame(prices_data)
+        # Convert prices data back to DataFrame (orient='index' → dates as rows, tickers as cols)
+        prices_df = pd.DataFrame.from_dict(prices_data, orient='index')
+        prices_df.index = pd.to_datetime(prices_df.index)
         
         mu, S = calculation_service.compute_stats(prices_df)
         
@@ -411,6 +436,133 @@ async def compute_statistics(prices_data: dict):
             success=False,
             error=str(e)
         )
+
+class BacktestRequest(BaseModel):
+    tickers: List[str]
+    prices_data: Dict[str, Dict[str, float]]
+    n_windows: int = 3
+    train_days: int = 252   # 1-year training window
+    test_days: int = 252    # 1-year test period
+    n_simulations: int = 500
+    risk_free_annual: float = 0.04
+    spy_ticker: str = "SPY"
+
+
+@app.post("/backtest")
+async def run_backtest(request: BacktestRequest):
+    """
+    Rolling backtest: run ForecastService on historical training windows and
+    compare ensemble predictions to actual returns in the subsequent test period.
+    Returns per-window and aggregate MAE / directional hit-rate statistics.
+    """
+    try:
+        if not request.tickers or not request.prices_data:
+            raise HTTPException(status_code=400, detail="tickers and prices_data are required")
+
+        prices_df = pd.DataFrame.from_dict(request.prices_data, orient='index')
+        prices_df.index = pd.to_datetime(prices_df.index)
+        prices_df = prices_df.sort_index()
+        prices_df = prices_df.apply(pd.to_numeric, errors='coerce').ffill().dropna(how='all')
+
+        total_days = len(prices_df)
+        required = request.train_days + request.test_days
+        if total_days < required + 20:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Need at least {required + 20} trading days of data, "
+                    f"got {total_days}. Use a longer data horizon (3Y or 5Y)."
+                ),
+            )
+
+        n = request.n_windows
+        available = total_days - request.train_days - request.test_days
+        step = max(30, available // max(1, n - 1)) if n > 1 else 0
+
+        windows = []
+        for i in range(n):
+            start_idx = i * step
+            train_end_idx = start_idx + request.train_days
+            test_end_idx = train_end_idx + request.test_days
+            if test_end_idx > total_days:
+                break
+
+            train_prices = prices_df.iloc[start_idx:train_end_idx]
+            test_prices = prices_df.iloc[train_end_idx:test_end_idx]
+
+            raw_forecasts = forecast_service.forecast(
+                prices=train_prices,
+                tickers=request.tickers,
+                n_simulations=request.n_simulations,
+                risk_free_annual=request.risk_free_annual,
+                spy_ticker=request.spy_ticker,
+            )
+
+            predicted = {
+                fc["ticker"]: fc["ensemble_return_1y"]
+                for fc in raw_forecasts
+                if fc.get("ensemble_return_1y") is not None
+            }
+
+            actuals = {}
+            for ticker in request.tickers:
+                if ticker == request.spy_ticker:
+                    continue
+                if ticker in test_prices.columns:
+                    series = test_prices[ticker].dropna()
+                    if len(series) >= 2:
+                        actuals[ticker] = float(series.iloc[-1] / series.iloc[0] - 1)
+
+            common = set(predicted) & set(actuals)
+            if not common:
+                continue
+
+            mae = float(np.mean([abs(predicted[t] - actuals[t]) for t in common]))
+            hit_rate = float(np.mean([(predicted[t] > 0) == (actuals[t] > 0) for t in common]))
+
+            windows.append({
+                "window_start": str(train_prices.index[0].date()),
+                "window_end":   str(train_prices.index[-1].date()),
+                "test_end":     str(test_prices.index[-1].date()),
+                "predicted":    predicted,
+                "actuals":      actuals,
+                "mae":          mae,
+                "hit_rate":     hit_rate,
+                "n_tickers":    len(common),
+            })
+
+        if not windows:
+            raise HTTPException(status_code=400, detail="No complete backtest windows could be formed")
+
+        all_errors, all_hits = [], []
+        ticker_errors: Dict[str, list] = {}
+        ticker_hits:   Dict[str, list] = {}
+        for w in windows:
+            common = set(w["predicted"]) & set(w["actuals"])
+            for t in common:
+                err = abs(w["predicted"][t] - w["actuals"][t])
+                hit = int((w["predicted"][t] > 0) == (w["actuals"][t] > 0))
+                all_errors.append(err)
+                all_hits.append(hit)
+                ticker_errors.setdefault(t, []).append(err)
+                ticker_hits.setdefault(t, []).append(hit)
+
+        return ServiceResponse(success=True, data={
+            "windows":             windows,
+            "overall_mae":         float(np.mean(all_errors)),
+            "overall_hit_rate":    float(np.mean(all_hits)),
+            "per_ticker_mae":      {t: float(np.mean(v)) for t, v in ticker_errors.items()},
+            "per_ticker_hit_rate": {t: float(np.mean(v)) for t, v in ticker_hits.items()},
+            "n_tickers":           len(ticker_errors),
+            "n_windows":           len(windows),
+        }).model_dump()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in run_backtest: {e}")
+        return ServiceResponse(success=False, error=str(e))
+
 
 @app.post("/forecast-returns")
 async def forecast_returns(request: ForecastRequest):
@@ -446,7 +598,7 @@ async def forecast_returns(request: ForecastRequest):
             risk_free_annual=request.risk_free_annual,
         )
 
-        return ServiceResponse(success=True, data=result.dict())
+        return ServiceResponse(success=True, data=result.model_dump())
 
     except HTTPException:
         raise

@@ -4,3 +4,4 @@ __pycache__/
 sp500_data/price_cache/
 sp500_data/validation/
 sp500_data/*.parquet
+.env

@@ -12,10 +12,11 @@ import streamlit as st
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.analysis_engine import standardize_analysis_columns  # noqa: E402
+from shared.settings import settings  # noqa: E402
 
-DATA_SERVICE_URL = "http://localhost:8001"
-CALCULATION_SERVICE_URL = "http://localhost:8002"
-TICKER_SERVICE_URL = "http://localhost:8000"
+DATA_SERVICE_URL = settings.data_service_url
+CALCULATION_SERVICE_URL = settings.calc_service_url
+TICKER_SERVICE_URL = settings.ticker_service_url
 ANALYSIS_PERIODS = ["1y", "2y", "3y", "5y"]
 DEFAULT_TICKERS = [
     "AAPL","MSFT","GOOGL","AMZN","NVDA","TSLA","META","BRK-B","JPM","V"
@@ -42,7 +43,7 @@ def _render_optimization_results(
     weights_series = pd.Series(result['weights']).sort_values(ascending=False)
 
     with st.expander("📊 Price Preview", expanded=False):
-        st.dataframe(prices_df.tail(), use_container_width=True)
+        st.dataframe(prices_df.tail(), use_container_width=True, hide_index=True)
 
     st.subheader("📈 Expected Performance")
     m1, m2, m3 = st.columns(3)
@@ -68,6 +69,22 @@ def _render_optimization_results(
     st.subheader("💰 Dollar Allocation")
     st.dataframe(allocation_df, use_container_width=True, hide_index=True)
 
+    st.subheader("📉 Historical Performance")
+    normalized = prices_df[weights_series.index] / prices_df[weights_series.index].iloc[0] * 100
+    try:
+        import plotly.graph_objects as _go
+        fig = _go.Figure()
+        for col in normalized.columns:
+            fig.add_trace(_go.Scatter(x=normalized.index, y=normalized[col], mode="lines", name=col))
+        fig.update_layout(
+            xaxis_title="Date", yaxis_title="Indexed price (start = 100)",
+            height=360, margin=dict(l=30, r=10, t=20, b=30),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    except ImportError:
+        st.line_chart(normalized)
+
     dl1, dl2 = st.columns(2)
     with dl1:
         st.download_button(
@@ -84,9 +101,186 @@ def _render_optimization_results(
             mime="text/csv",
         )
 
-    st.subheader("📉 Historical Performance")
-    normalized = prices_df[weights_series.index] / prices_df[weights_series.index].iloc[0] * 100
-    st.line_chart(normalized)
+
+def _render_backtest_results(bt: dict) -> None:
+    """Render backtest output: summary metrics, scatter, per-window table, per-ticker bar chart."""
+    # ── Summary ───────────────────────────────────────────────────────────────
+    st.subheader("📊 Summary")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Overall MAE",      f"{bt['overall_mae'] * 100:.1f} pp")
+    m2.metric("Directional Accuracy", f"{bt['overall_hit_rate'] * 100:.1f}%")
+    m3.metric("Windows",          str(bt['n_windows']))
+    m4.metric("Tickers evaluated", str(bt['n_tickers']))
+    st.caption(
+        "MAE = mean absolute error between predicted and actual 1-year return (percentage points). "
+        "Directional accuracy = % of forecasts that correctly predicted the sign of the return."
+    )
+
+    # ── Per-window table ──────────────────────────────────────────────────────
+    st.subheader("🗓️ Per-Window Results")
+    window_rows = []
+    for w in bt["windows"]:
+        window_rows.append({
+            "Train start":  w["window_start"],
+            "Train end":    w["window_end"],
+            "Test end":     w["test_end"],
+            "Tickers":      w["n_tickers"],
+            "MAE (pp)":     round(w["mae"] * 100, 1),
+            "Hit rate (%)": round(w["hit_rate"] * 100, 1),
+        })
+    st.dataframe(pd.DataFrame(window_rows), use_container_width=True, hide_index=True)
+
+    # ── Scatter: predicted vs actual ──────────────────────────────────────────
+    st.subheader("🎯 Predicted vs Actual Returns")
+    scatter_rows = []
+    for i, w in enumerate(bt["windows"]):
+        label = f"W{i+1}: {w['window_end'][:7]}→{w['test_end'][:7]}"
+        common = set(w["predicted"]) & set(w["actuals"])
+        for t in sorted(common):
+            scatter_rows.append({
+                "Ticker":    t,
+                "Window":    label,
+                "Predicted": round(w["predicted"][t] * 100, 1),
+                "Actual":    round(w["actuals"][t] * 100, 1),
+            })
+    if scatter_rows:
+        scatter_df = pd.DataFrame(scatter_rows)
+        try:
+            import plotly.graph_objects as _go
+            windows_seen = scatter_df["Window"].unique().tolist()
+            colors = ["#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A"]
+            fig = _go.Figure()
+            # Perfect-prediction diagonal
+            all_vals = scatter_df[["Predicted", "Actual"]].values.flatten()
+            lo, hi = float(all_vals.min()) - 5, float(all_vals.max()) + 5
+            fig.add_trace(_go.Scatter(
+                x=[lo, hi], y=[lo, hi], mode="lines",
+                line=dict(dash="dash", color="grey", width=1),
+                name="Perfect forecast", showlegend=True,
+            ))
+            for j, win in enumerate(windows_seen):
+                sub = scatter_df[scatter_df["Window"] == win]
+                fig.add_trace(_go.Scatter(
+                    x=sub["Predicted"], y=sub["Actual"],
+                    mode="markers+text", text=sub["Ticker"],
+                    textposition="top center", textfont=dict(size=9),
+                    marker=dict(size=8, color=colors[j % len(colors)]),
+                    name=win,
+                ))
+            fig.update_layout(
+                xaxis_title="Predicted 1Y return (%)",
+                yaxis_title="Actual 1Y return (%)",
+                height=420, margin=dict(l=30, r=10, t=20, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except ImportError:
+            st.dataframe(scatter_df, use_container_width=True, hide_index=True)
+
+    # ── Per-ticker hit rate ───────────────────────────────────────────────────
+    st.subheader("📈 Per-Ticker Directional Accuracy")
+    ticker_hr = bt.get("per_ticker_hit_rate", {})
+    ticker_mae = bt.get("per_ticker_mae", {})
+    if ticker_hr:
+        ticker_df = pd.DataFrame({
+            "Ticker":       list(ticker_hr.keys()),
+            "Hit rate (%)": [round(v * 100, 1) for v in ticker_hr.values()],
+            "MAE (pp)":     [round(ticker_mae.get(t, 0) * 100, 1) for t in ticker_hr.keys()],
+        }).sort_values("Hit rate (%)", ascending=False).reset_index(drop=True)
+        try:
+            import plotly.graph_objects as _go
+            bar_colors = ["#00CC96" if v >= 50 else "#EF553B" for v in ticker_df["Hit rate (%)"]]
+            fig2 = _go.Figure(_go.Bar(
+                x=ticker_df["Ticker"], y=ticker_df["Hit rate (%)"],
+                marker_color=bar_colors, text=ticker_df["Hit rate (%)"],
+                textposition="outside",
+            ))
+            fig2.add_hline(y=50, line_dash="dash", line_color="grey", annotation_text="50% baseline")
+            fig2.update_layout(
+                yaxis_title="Hit rate (%)", yaxis=dict(range=[0, 105]),
+                height=320, margin=dict(l=30, r=10, t=20, b=40),
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+        except ImportError:
+            pass
+        st.dataframe(ticker_df, use_container_width=True, hide_index=True)
+
+    # ── Download ───────────────────────────────────────────────────────────────
+    if scatter_rows:
+        st.download_button(
+            "📥 Download Results (CSV)",
+            data=pd.DataFrame(scatter_rows).to_csv(index=False).encode("utf-8"),
+            file_name="backtest_results.csv",
+            mime="text/csv",
+        )
+
+
+def _render_comparison(
+    hist_result: dict,
+    fc_result: dict,
+    prices_df: pd.DataFrame,
+    investment: float,
+    risk_free: float,
+) -> None:
+    """Render side-by-side historical vs forecast-optimised portfolio comparison."""
+    # ── Metrics ───────────────────────────────────────────────────────────────
+    st.subheader("📈 Performance Comparison")
+    col_h, col_f = st.columns(2)
+    with col_h:
+        st.markdown("**📊 Historical**")
+        st.metric("Expected Return",    f"{hist_result['expected_annual_return'] * 100:.2f}%")
+        st.metric("Expected Volatility", f"{hist_result['annual_volatility'] * 100:.2f}%")
+        st.metric(f"Sharpe (rf={risk_free:.2f}%)", f"{hist_result['sharpe_ratio']:.2f}")
+    with col_f:
+        ret_delta    = (fc_result['expected_annual_return'] - hist_result['expected_annual_return']) * 100
+        vol_delta    = (fc_result['annual_volatility']      - hist_result['annual_volatility'])      * 100
+        sharpe_delta =  fc_result['sharpe_ratio']           - hist_result['sharpe_ratio']
+        st.markdown("**🔮 Forecast-Optimised**")
+        st.metric("Expected Return",     f"{fc_result['expected_annual_return'] * 100:.2f}%",
+                  delta=f"{ret_delta:+.2f}%")
+        st.metric("Expected Volatility", f"{fc_result['annual_volatility'] * 100:.2f}%",
+                  delta=f"{vol_delta:+.2f}%", delta_color="inverse")
+        st.metric(f"Sharpe (rf={risk_free:.2f}%)", f"{fc_result['sharpe_ratio']:.2f}",
+                  delta=f"{sharpe_delta:+.2f}")
+
+    # ── Weight shift table ─────────────────────────────────────────────────────
+    st.subheader("⚖️ Weight Shifts")
+    hist_w = pd.Series(hist_result['weights'])
+    fc_w   = pd.Series(fc_result['weights'])
+    all_tickers = hist_w.index.union(fc_w.index)
+    shift_df = pd.DataFrame({
+        "Ticker":         all_tickers,
+        "Historical (%)": (hist_w.reindex(all_tickers, fill_value=0) * 100).round(2).values,
+        "Forecast (%)":   (fc_w.reindex(all_tickers,   fill_value=0) * 100).round(2).values,
+    })
+    shift_df["Δ (pp)"] = (shift_df["Forecast (%)"] - shift_df["Historical (%)"]).round(2)
+    shift_df = shift_df.sort_values("Δ (pp)", ascending=False).reset_index(drop=True)
+    st.dataframe(shift_df, use_container_width=True, hide_index=True)
+
+    # ── Bar chart ──────────────────────────────────────────────────────────────
+    try:
+        import plotly.graph_objects as _go
+        fig = _go.Figure([
+            _go.Bar(x=shift_df["Ticker"], y=shift_df["Historical (%)"], name="Historical"),
+            _go.Bar(x=shift_df["Ticker"], y=shift_df["Forecast (%)"],   name="Forecast"),
+        ])
+        fig.update_layout(
+            barmode="group",
+            xaxis_title="Ticker", yaxis_title="Weight (%)",
+            height=360, margin=dict(l=30, r=10, t=20, b=30),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    except ImportError:
+        pass
+
+    # ── Download ───────────────────────────────────────────────────────────────
+    st.download_button(
+        "📥 Download Comparison (CSV)",
+        data=shift_df.to_csv(index=False).encode("utf-8"),
+        file_name="portfolio_comparison.csv",
+        mime="text/csv",
+    )
 
 
 class ServiceClient:
@@ -227,6 +421,7 @@ class ServiceClient:
         l2_reg: float,
         min_weight_threshold: float,
         min_holdings: int,
+        expected_returns_override: Optional[Dict[str, float]] = None,
     ) -> Optional[dict]:
         try:
             payload = {
@@ -243,6 +438,7 @@ class ServiceClient:
                 "l2_reg": l2_reg,
                 "min_weight_threshold": min_weight_threshold,
                 "min_holdings": min_holdings,
+                "expected_returns_override": expected_returns_override,
             }
             response = requests.post(f"{CALCULATION_SERVICE_URL}/optimize-portfolio", json=payload, timeout=120)
             data = response.json()
@@ -286,6 +482,42 @@ class ServiceClient:
             st.error(f"Forecast call failed: {exc}")
             return None
 
+    def get_backtest(
+        self,
+        tickers: List[str],
+        prices: pd.DataFrame,
+        n_windows: int = 3,
+        n_simulations: int = 500,
+        risk_free_pct: float = 4.0,
+    ) -> Optional[dict]:
+        """Call /backtest on the calculation service."""
+        try:
+            payload = {
+                "tickers": tickers,
+                "prices_data": {
+                    str(idx): {col: float(val) for col, val in row.items()}
+                    for idx, row in prices.round(6).iterrows()
+                },
+                "n_windows":        n_windows,
+                "train_days":       252,
+                "test_days":        252,
+                "n_simulations":    n_simulations,
+                "risk_free_annual": risk_free_pct / 100.0,
+                "spy_ticker":       "SPY",
+            }
+            response = requests.post(
+                f"{CALCULATION_SERVICE_URL}/backtest",
+                json=payload,
+                timeout=300,
+            )
+            data = response.json()
+            if not data.get("success"):
+                raise RuntimeError(data.get("error", "Backtest service error"))
+            return data.get("data")
+        except Exception as exc:
+            st.error(f"Backtest call failed: {exc}")
+            return None
+
 
 # ── App bootstrap ────────────────────────────────────────────────────────────
 
@@ -307,6 +539,14 @@ _STATE_DEFAULTS = {
     'universe_changes': None,
     'forecast_result': None,
     'forecast_prices': None,
+    'forecast_expected_returns': None,  # Dict[str, float] populated after a forecast run
+    'use_forecast_returns': False,       # one-shot flag: auto-select "Use Forecast Returns" radio
+    'optimization_last_params': None,   # Dict: snapshot of optimizer settings at last run
+    'optimization_input_tickers': [],    # List[str]: full ticker list fed into the optimizer (before weight pruning)
+    'optimization_tickers': [],         # List[str]: non-zero-weight tickers after optimizer pruning
+    'forecast_tickers': [],             # List[str]: tickers from last forecast run
+    'comparison_results': None,         # Dict: {'historical', 'forecast', 'prices', 'investment', 'risk_free'}
+    'backtest_result': None,            # Dict: backtest response from /backtest endpoint
 }
 for key, default in _STATE_DEFAULTS.items():
     if key not in st.session_state:
@@ -371,14 +611,42 @@ def get_analysis(period: str, force_refresh: bool = False) -> Tuple[pd.DataFrame
     return df, metadata
 
 
+# ── Pipeline status helper ───────────────────────────────────────────────────
+
+def _pipeline_status() -> None:
+    """Compact one-line pipeline progress bar shown at the top of workflow tabs."""
+    input_tickers = st.session_state.get('optimization_input_tickers', [])
+    opt_tickers = st.session_state.get('optimization_tickers', [])
+    fc_tickers = st.session_state.get('forecast_tickers', [])
+    bt_result = st.session_state.get('backtest_result')
+    parts = []
+    if input_tickers:
+        pruned = f" → {len(opt_tickers)} after pruning" if opt_tickers and len(opt_tickers) != len(input_tickers) else ""
+        parts.append(f"📊 Portfolio: {len(input_tickers)} stocks{pruned} ✅")
+    else:
+        parts.append("📊 Portfolio: _not run_")
+    if fc_tickers:
+        parts.append(f"🔮 Forecast: {len(fc_tickers)} stocks ✅")
+    else:
+        parts.append("🔮 Forecast: _not run_")
+    if bt_result:
+        n_win = bt_result.get('n_windows', '?')
+        parts.append(f"📅 Backtest: {n_win} windows ✅")
+    else:
+        parts.append("📅 Backtest: _not run_")
+    st.caption("**Pipeline:** " + " | ".join(parts))
+
+
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab_analyzer, tab_optimizer, tab_health, tab_universe, tab_forecast = st.tabs([
-    "🔍 S&P 500 Stock Analyzer",
-    "📊 Portfolio Optimizer",
+tab_health, tab_analyzer, tab_optimizer, tab_forecast, tab_backtest, tab_compare, tab_universe = st.tabs([
     "📋 Data Health",
-    "🔄 Universe Changes",
+    "🔍 S&P 500 Analyzer",
+    "📊 Optimizer",
     "🔮 Forecast",
+    "📅 Backtest",
+    "🔀 Compare",
+    "🔄 Universe",
 ])
 
 # ── Tab: Stock Analyzer ──────────────────────────────────────────────────────
@@ -397,13 +665,13 @@ with tab_analyzer:
 
     ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([2, 1, 1, 1])
     with ctrl1:
-        analysis_period = st.selectbox("Analysis period", period_options, index=0, key="analysis_period_micro")
+        analysis_period = st.selectbox("Analysis period", period_options, index=0, key="analysis_period")
     with ctrl2:
-        analyze_button = st.button("🚀 Analyze Stocks", type="primary")
+        analyze_button = st.button("🚀 Analyze Stocks", type="primary", use_container_width=True)
     with ctrl3:
         force_refresh = st.button("🔄 Force Refresh")
     with ctrl4:
-        if st.button("🔄 Refresh Status"):
+        if st.button("🔄 Refresh", key="refresh_analyzer"):
             refresh_cache_summary()
             st.rerun()
 
@@ -436,26 +704,31 @@ with tab_analyzer:
             thru = format_timestamp(analysis_meta.get("data_through"))
             st.caption(f"Last analysis: {ts} | Prices through: {thru}")
 
-        display_cols = ['Ticker', 'Annual_Return', 'Sharpe_Ratio', 'Volatility',
-                        'Max_Drawdown', 'Recent_3M_Return', 'Current_Price', 'Composite_Score']
+        base_cols = ['Ticker', 'Annual_Return', 'Sharpe_Ratio', 'Volatility',
+                     'Max_Drawdown', 'Recent_3M_Return', 'Current_Price', 'Composite_Score']
+        has_12m = 'Recent_12M_Return' in analysis_df.columns
+        display_cols = base_cols[:6] + (['Recent_12M_Return'] if has_12m else []) + base_cols[6:]
         display_df = analysis_df[display_cols].head(20).copy()
         display_df['Annual_Return'] = (display_df['Annual_Return'] * 100).round(2).astype(str) + '%'
         display_df['Volatility'] = (display_df['Volatility'] * 100).round(2).astype(str) + '%'
         display_df['Max_Drawdown'] = (display_df['Max_Drawdown'] * 100).round(2).astype(str) + '%'
         display_df['Recent_3M_Return'] = (display_df['Recent_3M_Return'] * 100).round(2).astype(str) + '%'
+        if has_12m:
+            display_df['Recent_12M_Return'] = (display_df['Recent_12M_Return'] * 100).round(2).astype(str) + '%'
         display_df['Sharpe_Ratio'] = display_df['Sharpe_Ratio'].round(2)
         display_df['Current_Price'] = '$' + display_df['Current_Price'].round(2).astype(str)
         display_df['Composite_Score'] = display_df['Composite_Score'].round(3)
-        display_df.columns = ['Ticker', 'Annual Return', 'Sharpe Ratio', 'Volatility',
-                              'Max Drawdown', '3M Return', 'Price', 'Score']
+        col_labels = ['Ticker', 'Annual Return', 'Sharpe Ratio', 'Volatility',
+                      'Max Drawdown', '3M Return'] + (['12M Return'] if has_12m else []) + ['Price', 'Score']
+        display_df.columns = col_labels
         st.dataframe(display_df, use_container_width=True)
 
         col_a, col_b = st.columns([2, 1])
         with col_a:
-            if st.button("📈 Use Top 20 for Portfolio Optimization", key="use_top20_micro"):
+            if st.button("📈 Use Top 20 for Portfolio Optimization", key="use_top20"):
                 st.session_state['recommended_tickers'] = ",".join(analysis_df['Ticker'].head(20).tolist())
-                st.success(
-                    "✅ Top 20 tickers ready. Switch to the **📊 Portfolio Optimizer** tab, "
+                st.info(
+                    "Top 20 tickers ready. Switch to the **📊 Portfolio Optimizer** tab, "
                     "choose **Manual Entry**, then click **🚀 Optimize Portfolio**."
                 )
         with col_b:
@@ -483,6 +756,7 @@ with tab_analyzer:
 with tab_optimizer:
     st.header("📊 Portfolio Optimizer")
     st.caption("Adjust settings, choose a universe, and let the services build an allocation for you.")
+    _pipeline_status()
 
     # ── ⚙️ Analysis Settings ─────────────────────────────────────────────────
     st.subheader("⚙️ Analysis Settings")
@@ -570,11 +844,19 @@ with tab_optimizer:
 
     # ── 🎯 Stock Selection ────────────────────────────────────────────────────
     st.subheader("🎯 Stock Selection")
+    has_forecast = bool(st.session_state.get("forecast_expected_returns"))
+    radio_options = ["Manual Entry", "Use Top Performers from Analysis", "Custom from Analysis"]
+    if has_forecast:
+        radio_options.append("Use Forecast Returns")
+    default_radio = radio_options.index("Use Forecast Returns") if st.session_state.get("use_forecast_returns") and has_forecast else 0
     stock_selection = st.radio(
         "Choose how to feed tickers into the optimizer",
-        ["Manual Entry", "Use Top Performers from Analysis", "Custom from Analysis"],
-        horizontal=True
+        radio_options,
+        index=default_radio,
+        horizontal=True,
     )
+    # Clear the one-shot flag once the tab has rendered
+    st.session_state["use_forecast_returns"] = False
 
     tickers: List[str] = []
 
@@ -592,10 +874,22 @@ with tab_optimizer:
             tickers = cached_df.head(num_top_stocks)['Ticker'].tolist()
             if metadata:
                 freshness = format_timestamp(metadata.get("last_updated"))
-                st.success(f"Using cached analysis from {freshness}.")
+                st.info(f"Using cached analysis from {freshness}.")
             st.session_state['recommended_tickers'] = ",".join(tickers)
         else:
             st.warning("No cached analysis available for this horizon. Falling back to defaults.")
+            tickers = DEFAULT_TICKERS
+    elif stock_selection == "Use Forecast Returns":
+        er_override = st.session_state.get("forecast_expected_returns") or {}
+        tickers = list(er_override.keys())
+        if tickers:
+            st.info(
+                f"Using {len(tickers)} tickers from last forecast. "
+                "Ensemble 1Y return estimates will replace historical expected returns."
+            )
+            st.session_state['recommended_tickers'] = ",".join(tickers)
+        else:
+            st.warning("No forecast results found. Run a forecast first.")
             tickers = DEFAULT_TICKERS
     else:
         custom_analysis_df, _ = get_analysis(horizon, force_refresh=False)
@@ -617,7 +911,7 @@ with tab_optimizer:
         st.warning("No tickers provided. Using defaults.")
         tickers = DEFAULT_TICKERS
 
-    st.info(f"Optimizing with {len(tickers)} tickers.")
+    st.caption(f"Optimizing with {len(tickers)} tickers.")
 
     # ── Run ───────────────────────────────────────────────────────────────────
     st.divider()
@@ -633,7 +927,14 @@ with tab_optimizer:
         if prices_df.empty:
             st.error("Insufficient price data returned from the data service.")
         else:
+            # Store input tickers (before pruning) so downstream tabs can use the same universe
+            st.session_state['optimization_input_tickers'] = tickers
             st.session_state['optimization_prices'] = prices_df
+            er_override = (
+                st.session_state.get("forecast_expected_returns")
+                if stock_selection == "Use Forecast Returns"
+                else None
+            )
             with st.spinner("Optimizing portfolio…"):
                 result = client.optimize_portfolio(
                     prices=prices_df,
@@ -646,11 +947,25 @@ with tab_optimizer:
                     l2_reg=l2_reg,
                     min_weight_threshold=min_weight_threshold,
                     min_holdings=min_holdings,
+                    expected_returns_override=er_override,
                 )
             if not result:
                 st.error("Optimization failed. Adjust constraints or verify services are running.")
             else:
                 st.session_state['optimization_result'] = result
+                st.session_state['optimization_tickers'] = [
+                    t for t, w in result.get('weights', {}).items() if w > 0
+                ]
+                st.session_state['optimization_last_params'] = {
+                    'investment':          investment,
+                    'objective':           objective,
+                    'risk_free':           risk_free,
+                    'target_return':       target_return,
+                    'max_weight':          max_weight,
+                    'l2_reg':              l2_reg,
+                    'min_weight_threshold': min_weight_threshold,
+                    'min_holdings':        min_holdings,
+                }
 
     # ── Results (from session state) ──────────────────────────────────────────
     if st.session_state['optimization_result'] and st.session_state['optimization_prices'] is not None:
@@ -660,6 +975,12 @@ with tab_optimizer:
             investment,
             risk_free,
         )
+        opt_t = st.session_state.get('optimization_tickers', [])
+        if opt_t:
+            st.caption(
+                f"Portfolio locked ({len(opt_t)} stocks). "
+                "➡️ Next: **🔮 Forecast** tab — select **Use Portfolio Tickers** to forecast these stocks."
+            )
 
 # ── Tab: Data Health ──────────────────────────────────────────────────────────
 
@@ -668,7 +989,7 @@ with tab_health:
     st.caption("Overview of price cache freshness, analysis cache status, and S&P 500 ticker universe health.")
 
     # ── Section A: Load / refresh data ───────────────────────────────────────
-    if st.button("🔄 Refresh Dashboard") or not st.session_state['health_data']:
+    if st.button("🔄 Refresh", key="refresh_health") or not st.session_state['health_data']:
         with st.spinner("Loading health data…"):
             st.session_state['health_data'] = {
                 'price_cache': client.get_price_cache_info(),
@@ -742,20 +1063,20 @@ with tab_health:
 
     # ── Section C: Staleness alerts ───────────────────────────────────────────
     if price_age_hours is None:
-        st.error("⚠️ Price cache is missing. Run: `./run-price-sync.sh`")
+        st.error("Price cache is missing. Run: `./run-price-sync.sh`")
     elif price_age_hours > 168:
         st.error(
-            f"⚠️ Price cache is {price_age_days:.0f} days old. "
+            f"Price cache is {price_age_days:.0f} days old. "
             "Run: `./run-price-sync.sh`"
         )
     elif price_age_hours > 24:
         st.warning(f"Price cache is {price_age_hours:.0f}h old — consider refreshing.")
 
     if analysis_age_hours is None:
-        st.error("⚠️ Analysis cache is missing. Run: `./run-analysis-sync.sh`")
+        st.error("Analysis cache is missing. Run: `./run-analysis-sync.sh`")
     elif analysis_age_hours > 168:
         st.error(
-            f"⚠️ Analysis cache is {analysis_age_days:.0f} days old. "
+            f"Analysis cache is {analysis_age_days:.0f} days old. "
             "Run: `./run-analysis-sync.sh`"
         )
 
@@ -850,14 +1171,6 @@ with tab_health:
     last_modified = cache_info_h.get("last_modified") or cache_info_h.get("last_updated")
     size_bytes = cache_info_h.get("size_bytes")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("**Constituent file:** `sp500_data/sp500_constituents.csv`")
-        if last_modified:
-            st.markdown(f"**Last modified:** {format_timestamp(last_modified)}")
-        if size_bytes:
-            st.markdown(f"**File size:** {size_bytes / 1024:.1f} KB")
-
     if ticker_validation:
         run_ts = ticker_validation.get("run_timestamp") or ticker_validation.get("timestamp")
         matched = ticker_validation.get("universe_matched", False)
@@ -865,15 +1178,19 @@ with tab_health:
         remote_count = ticker_validation.get("remote_count")
         missing = ticker_validation.get("missing_from_remote") or []
         new_in_remote = ticker_validation.get("new_in_remote") or []
+    else:
+        run_ts = matched = cached_count = remote_count = None
+        missing = new_in_remote = []
 
-        with col_b:
-            if run_ts:
-                st.markdown(f"**Last validation run:** {format_timestamp(run_ts)}")
-            match_icon = "✅ Yes" if matched else "❌ No"
-            st.markdown(f"**Universe matched:** {match_icon}")
-            if cached_count is not None and remote_count is not None:
-                st.markdown(f"**Cached count:** {cached_count} | **Remote count:** {remote_count}")
+    mu1, mu2, mu3, mu4 = st.columns(4)
+    mu1.metric("File Last Modified", format_timestamp(last_modified) if last_modified else "—")
+    mu2.metric("File Size", f"{size_bytes / 1024:.1f} KB" if size_bytes else "—")
+    mu3.metric("Last Validation Run", format_timestamp(run_ts) if run_ts else "—")
+    mu4.metric("Universe Matched", "✅ Yes" if matched else ("❌ No" if ticker_validation else "—"))
+    if cached_count is not None and remote_count is not None:
+        st.caption(f"Cached tickers: {cached_count} | Remote tickers: {remote_count}")
 
+    if ticker_validation:
         if missing:
             st.warning(f"**Missing from remote (possibly delisted):** {', '.join(missing)}")
             st.dataframe(pd.DataFrame({"Delisted / Missing": missing}), use_container_width=True, hide_index=True)
@@ -881,7 +1198,7 @@ with tab_health:
             st.info(f"**New in remote (pending add):** {', '.join(new_in_remote)}")
             st.dataframe(pd.DataFrame({"Pending Add": new_in_remote}), use_container_width=True, hide_index=True)
         if not missing and not new_in_remote:
-            st.success("Ticker universe is in sync with the remote S&P 500 list.")
+            st.info("Ticker universe is in sync with the remote S&P 500 list.")
     else:
         st.info("No ticker validation data found. Run price sync to generate a validation report.")
 
@@ -929,7 +1246,7 @@ with tab_health:
         failed_all_list: list = sync_report.get("failed_all_periods") or []
 
         if failed_all_list:
-            st.error(f"⚠️ {failed_all_n} ticker(s) failed in ALL periods — not available in any cache.")
+            st.error(f"{failed_all_n} ticker(s) failed in ALL periods — not available in any cache.")
             st.dataframe(
                 pd.DataFrame({"Ticker": failed_all_list}),
                 use_container_width=True, hide_index=True,
@@ -1059,13 +1376,31 @@ with tab_universe:
 
 # ── Tab: Forecast ─────────────────────────────────────────────────────────────
 
-def _render_forecast_results(forecasts: list, fc_meta: dict) -> None:
+def _render_forecast_results(
+    forecasts: list,
+    fc_meta: dict,
+    prices_df: Optional[pd.DataFrame] = None,
+) -> None:
     """Render the full Forecast tab output."""
+    import numpy as np
+
     try:
         import plotly.graph_objects as go
         has_plotly = True
     except ImportError:
         has_plotly = False
+
+    # ── Pre-compute SPY benchmark (compound-growth line, normalized to start=1.0)
+    # Computed once here; scaled to each stock's current_price inside the chart loop.
+    spy_daily_growth: Optional[float] = None
+    if prices_df is not None and "SPY" in prices_df.columns:
+        spy_series = prices_df["SPY"].dropna()
+        if len(spy_series) >= 30:
+            spy_ret = spy_series.pct_change().dropna().values
+            spy_cumulative = float(np.prod(1 + spy_ret))
+            n_years = len(spy_ret) / 252.0
+            spy_cagr = spy_cumulative ** (1.0 / n_years) - 1
+            spy_daily_growth = (1 + spy_cagr) ** (1 / 252) - 1
 
     # ── Ensemble summary ──────────────────────────────────────────────────────
     st.subheader("📊 Ensemble Forecast Summary")
@@ -1121,13 +1456,18 @@ def _render_forecast_results(forecasts: list, fc_meta: dict) -> None:
         ]), use_container_width=True, hide_index=True)
 
     # ── Fan charts ────────────────────────────────────────────────────────────
-    st.subheader("📈 Monte Carlo Fan Charts — Top 5 Tickers")
+    st.divider()
+    st.subheader("📈 Fan Charts")
+    max_fan = min(len(forecasts), 20)
+    fan_n = st.slider("Number of tickers to show", min_value=1, max_value=max_fan,
+                      value=min(5, max_fan), key="fc_fan_n")
     st.caption(
         "10 representative paths spanning the p10–p90 range of simulated outcomes. "
-        "Shaded band = p10 to p90. Dashed line = current price. Dotted line = 1Y mark."
+        "Shaded band = p10 to p90. Grey dashed = current price. Dotted vertical = 1Y mark. "
+        + ("Orange dashed = SPY historical CAGR projection." if spy_daily_growth is not None else "")
     )
 
-    fan_tickers = forecasts[:5]
+    fan_tickers = forecasts[:fan_n]
     fan_cols = st.columns(min(len(fan_tickers), 3))
 
     for i, fc in enumerate(fan_tickers):
@@ -1137,9 +1477,9 @@ def _render_forecast_results(forecasts: list, fc_meta: dict) -> None:
         col = fan_cols[i % 3]
         with col:
             if has_plotly:
-                import numpy as np
                 paths_arr = np.array(paths)
-                x_days = list(range(paths_arr.shape[1]))
+                n_days = paths_arr.shape[1]
+                x_days = list(range(n_days))
                 fig = go.Figure()
                 for path in paths_arr:
                     fig.add_trace(go.Scatter(
@@ -1156,14 +1496,25 @@ def _render_forecast_results(forecasts: list, fc_meta: dict) -> None:
                     x=x_days, y=paths_arr[4].tolist(), mode="lines",
                     line=dict(width=2.5, color="steelblue"), showlegend=False,
                 ))
+                # SPY benchmark overlay
+                if spy_daily_growth is not None:
+                    spy_future = fc["current_price"] * (1 + spy_daily_growth) ** np.arange(n_days)
+                    fig.add_trace(go.Scatter(
+                        x=x_days, y=spy_future.tolist(), mode="lines",
+                        name="SPY CAGR", line=dict(width=1.8, color="orange", dash="dash"),
+                        showlegend=True,
+                    ))
                 fig.add_hline(
                     y=fc["current_price"], line_dash="dash", line_color="grey",
                     annotation_text=f"Now: ${fc['current_price']:.0f}",
                 )
-                fig.add_vline(x=252, line_dash="dot", line_color="orange", annotation_text="1Y")
+                fig.add_vline(x=252, line_dash="dot", line_color="grey", annotation_text="1Y")
                 fig.update_layout(
                     title=fc["ticker"], xaxis_title="Trading days", yaxis_title="Price ($)",
                     height=320, margin=dict(l=30, r=10, t=40, b=30),
+                    showlegend=spy_daily_growth is not None,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                xanchor="right", x=1, font=dict(size=9)),
                 )
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -1188,35 +1539,67 @@ def _render_forecast_results(forecasts: list, fc_meta: dict) -> None:
 
 
 with tab_forecast:
-    st.header("🔮 Return Forecast — Top Performers")
+    st.header("🔮 Return Forecast")
     st.caption(
         "Ensemble forecast blending Monte Carlo GBM, CAPM, and log-linear trend regression. "
         "Statistical projections only — not investment advice."
     )
+    _pipeline_status()
 
-    fc1, fc2, fc3, fc4 = st.columns(4)
+    # ── Ticker selection ───────────────────────────────────────────────────────
+    st.subheader("🎯 Ticker Selection")
+    _has_opt_tickers = bool(st.session_state.get('optimization_tickers'))
+    fc_ticker_options = ["Top N Performers", "Manual Entry"]
+    if _has_opt_tickers:
+        fc_ticker_options.insert(0, "Use Portfolio Tickers")
+    fc_default_mode = 0 if _has_opt_tickers else 0
+    fc_stock_mode = st.radio(
+        "Which stocks to forecast",
+        fc_ticker_options,
+        index=fc_default_mode,
+        horizontal=True,
+        key="fc_stock_mode",
+    )
+
+    fc1, fc2, fc3 = st.columns(3)
     with fc1:
         forecast_period = st.selectbox("Lookback period", ANALYSIS_PERIODS, index=0, key="fc_period")
     with fc2:
-        forecast_top_n = st.slider("Top N stocks", min_value=3, max_value=20, value=10, key="fc_top_n")
-    with fc3:
         forecast_rf = st.number_input("Risk-free rate (annual %)", value=4.0, step=0.25, key="fc_rf")
-    with fc4:
+    with fc3:
         forecast_simulations = st.select_slider(
             "Simulations", options=[500, 1000, 2000, 5000], value=1000, key="fc_sims"
         )
+
+    if fc_stock_mode == "Use Portfolio Tickers":
+        fc_tickers_to_run = st.session_state['optimization_tickers']
+        st.caption(f"Using {len(fc_tickers_to_run)} tickers from the optimized portfolio.")
+    elif fc_stock_mode == "Manual Entry":
+        fc_manual = st.text_input(
+            "Tickers (comma-separated)",
+            value=",".join(DEFAULT_TICKERS[:10]),
+            key="fc_manual_tickers",
+        )
+        fc_tickers_to_run = [t.strip().upper() for t in fc_manual.split(",") if t.strip()]
+    else:
+        forecast_top_n = st.slider("Top N stocks", min_value=3, max_value=20, value=10, key="fc_top_n")
+        fc_tickers_to_run = None  # resolved after analysis load
 
     if st.button("🚀 Run Forecast", type="primary", use_container_width=True, key="fc_run"):
         st.session_state["forecast_result"] = None
         st.session_state["forecast_prices"] = None
 
-        with st.spinner("Loading top performers…"):
-            analysis_df, _ = get_analysis(forecast_period, force_refresh=False)
+        if fc_stock_mode == "Top N Performers":
+            with st.spinner("Loading top performers…"):
+                analysis_df, _ = get_analysis(forecast_period, force_refresh=False)
+            if analysis_df is None or analysis_df.empty:
+                st.error("No analysis data available. Run the S&P 500 Analyzer first.")
+                fc_tickers_to_run = None
+            else:
+                fc_tickers_to_run = analysis_df["Ticker"].head(forecast_top_n).tolist()
 
-        if analysis_df is None or analysis_df.empty:
-            st.error("No analysis data available. Run the S&P 500 Analyzer first.")
-        else:
-            top_tickers = analysis_df["Ticker"].head(forecast_top_n).tolist()
+        if fc_tickers_to_run:
+            top_tickers = fc_tickers_to_run
             price_tickers = list(dict.fromkeys(top_tickers + ["SPY"]))
 
             with st.spinner(f"Fetching prices for {len(price_tickers)} tickers…"):
@@ -1237,6 +1620,14 @@ with tab_forecast:
                     )
                 if result:
                     st.session_state["forecast_result"] = result
+                    # Store ensemble returns so the Optimizer tab can use them
+                    er_map = {
+                        fc["ticker"]: fc["ensemble_return_1y"]
+                        for fc in result.get("forecasts", [])
+                        if fc.get("ensemble_return_1y") is not None
+                    }
+                    st.session_state["forecast_expected_returns"] = er_map or None
+                    st.session_state["forecast_tickers"] = list(er_map.keys())
                 else:
                     st.error("Forecast computation failed.")
 
@@ -1244,6 +1635,226 @@ with tab_forecast:
     if fc_result:
         forecasts_list = fc_result.get("forecasts", [])
         if forecasts_list:
-            _render_forecast_results(forecasts_list, fc_result)
+            _render_forecast_results(
+                forecasts_list, fc_result,
+                prices_df=st.session_state.get("forecast_prices"),
+            )
+            er_override = st.session_state.get("forecast_expected_returns")
+            if er_override:
+                st.divider()
+                ticker_list = list(er_override.keys())
+                st.caption(
+                    f"Forecast complete for {len(ticker_list)} tickers. "
+                    "➡️ Next: **📅 Backtest** tab — select **Use Portfolio Tickers** to validate these forecasts."
+                )
+                if st.button(
+                    "📤 Use Forecast Returns in Optimizer",
+                    type="secondary",
+                    key="fc_send_to_optimizer",
+                    use_container_width=True,
+                ):
+                    st.session_state["recommended_tickers"] = ",".join(ticker_list)
+                    st.session_state["use_forecast_returns"] = True
+                    st.success(
+                        "Done! Switch to the **📊 Optimizer** tab, select "
+                        "**Use Forecast Returns** in Stock Selection, then click Optimize."
+                    )
         else:
             st.warning("No forecasts returned.")
+
+# ── Tab: Compare ──────────────────────────────────────────────────────────────
+
+with tab_compare:
+    st.header("🔀 Portfolio Comparison")
+    st.caption("Side-by-side: historical expected returns vs ensemble forecast returns, same tickers and constraints.")
+    _pipeline_status()
+
+    _prices    = st.session_state.get('optimization_prices')
+    _forecast  = st.session_state.get('forecast_expected_returns')
+    _params    = st.session_state.get('optimization_last_params') or {}
+
+    if _prices is None:
+        st.info("Run the **Portfolio Optimizer** first to provide price data for comparison.")
+    elif not _forecast:
+        st.info("Run a **Forecast** first — ensemble return estimates are needed for the forecast-optimised portfolio.")
+    else:
+        _common_tickers = [t for t in _forecast.keys() if t in _prices.columns]
+        if len(_common_tickers) < 2:
+            st.warning(
+                "Price data covers fewer than 2 forecast tickers. "
+                "Re-run the optimizer using **Use Forecast Returns** so prices match the forecast universe."
+            )
+        else:
+            st.info(
+                f"Ready to compare **{len(_common_tickers)} tickers** using the same constraints as the last optimizer run."
+            )
+            if st.button("🔀 Run Comparison", type="primary", use_container_width=True,
+                         key="compare_run"):
+                st.session_state['comparison_results'] = None
+                _compare_prices = _prices[_common_tickers]
+                _inv  = _params.get('investment',          250_000)
+                _obj  = _params.get('objective',           'Max Sharpe')
+                _rf   = _params.get('risk_free',           4.0)
+                _tr   = _params.get('target_return',       10.0)
+                _mw   = _params.get('max_weight',          30)
+                _l2   = _params.get('l2_reg',              5.0)
+                _mwt  = _params.get('min_weight_threshold', 0.25)
+                _mh   = _params.get('min_holdings',        3)
+
+                with st.spinner("Running historical optimisation…"):
+                    _hist = client.optimize_portfolio(
+                        prices=_compare_prices, tickers=_common_tickers,
+                        investment=_inv, objective=_obj, risk_free=_rf,
+                        target_return=_tr, max_weight=_mw, l2_reg=_l2,
+                        min_weight_threshold=_mwt, min_holdings=_mh,
+                        expected_returns_override=None,
+                    )
+                with st.spinner("Running forecast-optimised portfolio…"):
+                    _fc = client.optimize_portfolio(
+                        prices=_compare_prices, tickers=_common_tickers,
+                        investment=_inv, objective=_obj, risk_free=_rf,
+                        target_return=_tr, max_weight=_mw, l2_reg=_l2,
+                        min_weight_threshold=_mwt, min_holdings=_mh,
+                        expected_returns_override={t: _forecast[t] for t in _common_tickers},
+                    )
+                if _hist and _fc:
+                    st.session_state['comparison_results'] = {
+                        'historical': _hist, 'forecast': _fc,
+                        'prices': _compare_prices, 'investment': _inv, 'risk_free': _rf,
+                    }
+                else:
+                    st.error("One or both optimisations failed. Check service logs and constraints.")
+
+    if st.session_state.get('comparison_results'):
+        _cr = st.session_state['comparison_results']
+        _render_comparison(
+            _cr['historical'], _cr['forecast'],
+            _cr['prices'], _cr['investment'], _cr['risk_free'],
+        )
+
+# ── Tab: Backtest ─────────────────────────────────────────────────────────────
+
+with tab_backtest:
+    st.header("📅 Forecast Backtester")
+    st.caption(
+        "Validates the ensemble forecast model on historical data. "
+        "Splits price history into rolling train/test windows, runs the forecast on each training window, "
+        "then compares predicted vs actual 1-year returns."
+    )
+    _pipeline_status()
+
+    # ── Settings ──────────────────────────────────────────────────────────────
+    st.subheader("⚙️ Settings")
+    bt_col1, bt_col2, bt_col3 = st.columns(3)
+    with bt_col1:
+        bt_horizon = st.selectbox(
+            "Price history (data fetch)",
+            ["3y", "5y"],
+            index=0,
+            key="bt_horizon",
+        )
+        bt_interval = "1d"  # daily data required for reliable GBM fits
+    with bt_col2:
+        bt_n_windows = st.slider(
+            "Number of rolling windows",
+            min_value=2, max_value=4, value=3, step=1,
+            key="bt_n_windows",
+        )
+        bt_n_sims = st.select_slider(
+            "Monte Carlo simulations per window",
+            options=[200, 500, 1000],
+            value=500,
+            key="bt_n_sims",
+        )
+    with bt_col3:
+        bt_rf = st.number_input(
+            "Risk-free rate (annual, %)",
+            value=4.0, step=0.25,
+            key="bt_risk_free",
+        )
+
+    # ── Ticker selection ───────────────────────────────────────────────────────
+    st.subheader("🎯 Ticker Selection")
+    _has_opt = bool(st.session_state.get('optimization_tickers'))
+    _has_fc = bool(st.session_state.get("forecast_expected_returns"))
+    bt_ticker_options = ["Manual Entry", "Use Top Performers from Analysis"]
+    if _has_opt:
+        bt_ticker_options.insert(0, "Use Portfolio Tickers")
+    if _has_fc and "Use Forecast Tickers" not in bt_ticker_options:
+        bt_ticker_options.append("Use Forecast Tickers")
+    bt_stock_mode = st.radio(
+        "Tickers to backtest",
+        bt_ticker_options,
+        index=0,
+        horizontal=True,
+        key="bt_stock_mode",
+    )
+
+    if bt_stock_mode == "Use Portfolio Tickers":
+        bt_tickers = st.session_state['optimization_tickers']
+        st.caption(f"Using {len(bt_tickers)} tickers from the optimized portfolio.")
+    elif bt_stock_mode == "Manual Entry":
+        bt_tickers_raw = st.text_input(
+            "Tickers (comma-separated)",
+            value=",".join(DEFAULT_TICKERS[:10]),
+            key="bt_tickers_manual",
+        )
+        bt_tickers = [t.strip().upper() for t in bt_tickers_raw.split(",") if t.strip()]
+    elif bt_stock_mode == "Use Forecast Tickers" and _has_fc:
+        bt_tickers = list(st.session_state["forecast_expected_returns"].keys())
+        st.caption(f"Using {len(bt_tickers)} tickers from last forecast.")
+    else:
+        _bt_analysis = st.session_state.get('analysis_cache', {})
+        _bt_period = list(_bt_analysis.keys())[0] if _bt_analysis else None
+        if _bt_period:
+            _bt_entry = _bt_analysis[_bt_period]
+            _bt_df = _bt_entry.get('df') if isinstance(_bt_entry, dict) else _bt_entry
+            bt_tickers = _bt_df['Ticker'].head(15).tolist() if _bt_df is not None and not _bt_df.empty else DEFAULT_TICKERS[:10]
+        else:
+            st.caption("No analysis cached — using defaults.")
+            bt_tickers = DEFAULT_TICKERS[:10]
+
+    # include SPY for CAPM beta
+    if "SPY" not in bt_tickers:
+        bt_tickers_fetch = bt_tickers + ["SPY"]
+    else:
+        bt_tickers_fetch = bt_tickers
+
+    st.caption(f"Backtesting {len(bt_tickers)} tickers across {bt_n_windows} rolling 1-year windows.")
+
+    # ── Run ────────────────────────────────────────────────────────────────────
+    st.divider()
+    if st.button("🔁 Run Backtest", type="primary", use_container_width=True, key="bt_run"):
+        st.session_state['backtest_result'] = None
+        with st.spinner(f"Fetching {bt_horizon} of price data…"):
+            bt_prices = client.get_stock_data(bt_tickers_fetch, bt_horizon, bt_interval)
+        if bt_prices is None or bt_prices.empty:
+            st.error("No price data returned. Check that the data service is running.")
+        else:
+            bt_stock_tickers = [t for t in bt_tickers if t in bt_prices.columns]
+            if len(bt_stock_tickers) < 2:
+                st.error("Fewer than 2 tickers had price data. Adjust your selection.")
+            else:
+                with st.spinner(
+                    f"Running {bt_n_windows} backtest windows "
+                    f"({bt_n_sims} MC sims each) — this may take a minute…"
+                ):
+                    bt_result = client.get_backtest(
+                        tickers=bt_stock_tickers,
+                        prices=bt_prices,
+                        n_windows=bt_n_windows,
+                        n_simulations=bt_n_sims,
+                        risk_free_pct=bt_rf,
+                    )
+                if bt_result:
+                    st.session_state['backtest_result'] = bt_result
+                else:
+                    st.error("Backtest failed. Check that the calculation service is running and the data horizon is long enough.")
+
+    # ── Results ────────────────────────────────────────────────────────────────
+    if st.session_state.get('backtest_result'):
+        _render_backtest_results(st.session_state['backtest_result'])
+        st.caption(
+            "Backtest complete. "
+            "➡️ Next: **🔀 Compare** tab — see how forecast weights differ from historical weights."
+        )

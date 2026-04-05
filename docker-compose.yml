@@ -10,6 +10,10 @@ services:
       - ./sp500_data:/app/sp500_data
     environment:
       PORT: "${UI_PORT:-8501}"
+      DATA_SERVICE_URL: "http://localhost:${DATA_PORT:-8001}"
+      CALC_SERVICE_URL: "http://localhost:${CALC_PORT:-8002}"
+      TICKER_SERVICE_URL: "http://localhost:${TICKER_PORT:-8000}"
+      SP500_DATA_DIR: "/app/sp500_data"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]

@@ -3,6 +3,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+import io
+
 import pandas as pd
 import requests
 
@@ -49,7 +51,7 @@ class WikipediaTickerProvider:
         }
         response = requests.get(WIKIPEDIA_SP500_URL, headers=headers, timeout=30)
         response.raise_for_status()
-        tables = pd.read_html(response.text)
+        tables = pd.read_html(io.StringIO(response.text))
         for table in tables:
             columns = [str(col).strip().lower() for col in table.columns]
             if any(col in ("symbol", "ticker") for col in columns):

@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Query
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from shared.analysis_engine import standardize_analysis_columns
+from shared.settings import settings
 from shared.models import (
     StockDataRequest, StockAnalysisRequest, ServiceResponse,
     AnalysisMetadata, CacheInfo
@@ -37,7 +38,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Constants
-DATA_DIR = Path(__file__).resolve().parents[1] / "sp500_data"
+DATA_DIR = settings.sp500_data_dir
 ANALYSIS_FILE = DATA_DIR / "sp500_analysis.parquet"  # legacy single cache
 METADATA_FILE = DATA_DIR / "metadata.parquet"
 HIDDEN_ANALYSIS_COLUMNS = ['analysis_timestamp', 'analysis_period', 'data_through']
@@ -374,7 +375,7 @@ async def get_cache_info():
         cache_info = data_service.get_cache_info()
         return ServiceResponse(
             success=True,
-            data=cache_info.dict()
+            data=cache_info.model_dump()
         )
     except Exception as e:
         logger.error(f"Error in get_cache_info: {e}")

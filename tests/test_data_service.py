@@ -245,10 +245,7 @@ class TestSp500Analysis:
                    side_effect=HTTPException(status_code=503, detail="cache missing")):
             r = client.post("/sp500-analysis",
                             json={"tickers": ["AAPL"], "period": "1y"})
-        # Actual behavior: swallowed as success=False/200, not a real 503
-        assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "503" in r.json()["error"]
+        assert r.status_code == 503
 
     def test_returns_success_false_on_generic_exception(self, client):
         with patch("services.data_service.data_service.analyze_sp500_stocks",

@@ -29,6 +29,8 @@ def standardize_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns}, inplace=True)
     if 'Recent_3M_Return' not in df.columns:
         df['Recent_3M_Return'] = 0.0
+    if 'Recent_12M_Return' not in df.columns:
+        df['Recent_12M_Return'] = 0.0
     if 'Annual_Return' in df.columns and df['Annual_Return'].max() > 1:
         df['Annual_Return'] = df['Annual_Return'] / 100.0
     if 'Volatility' in df.columns and df['Volatility'].max() > 1:
@@ -50,6 +52,7 @@ class AnalysisResult:
     Sharpe_Ratio: float
     Max_Drawdown: float
     Recent_3M_Return: float
+    Recent_12M_Return: float
     Current_Price: float
 
 
@@ -108,6 +111,15 @@ class AnalysisEngine:
             recent_return = float((prices.iloc[-1] / prices.iloc[-63]) - 1)
         else:
             recent_return = 0.0
+        # 12-1 month momentum (Jegadeesh & Titman): 12M return excluding last 1M
+        # Requires ≥ 273 days (252 + 21).  Skipping the trailing month reduces
+        # short-term reversal noise that degrades the 3M signal.
+        if len(prices) >= 273:
+            recent_12m_return = float((prices.iloc[-22] / prices.iloc[-273]) - 1)
+        elif len(prices) >= 252:
+            recent_12m_return = float((prices.iloc[-1] / prices.iloc[-252]) - 1)
+        else:
+            recent_12m_return = 0.0
         current_price = float(prices.iloc[-1])
         return AnalysisResult(
             Ticker=ticker,
@@ -116,6 +128,7 @@ class AnalysisEngine:
             Sharpe_Ratio=sharpe,
             Max_Drawdown=max_drawdown,
             Recent_3M_Return=recent_return,
+            Recent_12M_Return=recent_12m_return,
             Current_Price=current_price,
         ).__dict__
 
@@ -131,7 +144,11 @@ class AnalysisEngine:
         """Mirror the Streamlit composite scoring."""
         # Percentile rank for fat-tailed metrics (outlier-robust)
         df['Return_Score'] = df['Annual_Return'].rank(pct=True)
-        df['Momentum_Score'] = df['Recent_3M_Return'].rank(pct=True)
+        df['Momentum_3M_Score'] = df['Recent_3M_Return'].rank(pct=True)
+        # 12-1M momentum: rank pct; falls back gracefully when column is all-zero
+        df['Momentum_12M_Score'] = df['Recent_12M_Return'].rank(pct=True)
+        # Combined momentum: equal blend of 3M and 12M signals
+        df['Momentum_Score'] = 0.5 * df['Momentum_3M_Score'] + 0.5 * df['Momentum_12M_Score']
         # Min-max for bounded metrics where outliers are rare
         df['Vol_Score'] = self._safe_normalize(df['Volatility'], inverse=True)
         df['Sharpe_Score'] = self._safe_normalize(df['Sharpe_Ratio'])

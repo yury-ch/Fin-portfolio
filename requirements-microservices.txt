@@ -2,7 +2,7 @@
 streamlit
 yfinance
 pandas
-numpy<2
+numpy  # was numpy<2; numpy 2.x is installed and working — constraint relaxed
 PyPortfolioOpt
 scikit-learn
 
@@ -10,6 +10,8 @@ scikit-learn
 fastapi
 uvicorn[standard]
 pydantic
+pydantic-settings>=2.0
+python-dotenv>=1.0
 requests
 python-multipart
 lxml

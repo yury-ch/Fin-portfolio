@@ -32,6 +32,7 @@ class PortfolioOptimizationRequest(BaseModel):
     l2_reg: float = 5.0
     min_weight_threshold: float = 0.25  # percent
     min_holdings: int = 3
+    expected_returns_override: Optional[Dict[str, float]] = None  # annualised decimal, e.g. 0.18 for 18%
 
 class AnalysisMetadata(BaseModel):
     """Metadata for cached analysis"""
