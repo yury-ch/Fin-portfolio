@@ -5,12 +5,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Install build deps, pip install, then remove build deps to keep image small (T-01, T-06)
+COPY requirements-lock.txt .
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
+    && pip install --no-cache-dir -r requirements-lock.txt \
+    && apt-get purge -y --auto-remove build-essential \
     && rm -rf /var/lib/apt/lists/*
-
-COPY requirements-microservices.txt .
-RUN pip install --no-cache-dir -r requirements-microservices.txt
 
 COPY . .
 

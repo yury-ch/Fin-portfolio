@@ -69,13 +69,13 @@ def build_cache_info(provider: WikipediaTickerProvider) -> CacheInfo:
 
 
 @app.get("/health")
-async def health(provider: WikipediaTickerProvider = Depends(get_provider)):
+async def health(provider: WikipediaTickerProvider = Depends(get_provider)) -> dict:
     """Simple health endpoint with cache diagnostics."""
     cache = build_cache_info(provider)
     return {
         "status": "healthy",
         "service": "ticker_service",
-        "cache": cache.dict(),
+        "cache": cache.model_dump(),
     }
 
 
@@ -88,7 +88,7 @@ async def get_sp500_tickers(
         True, description="Return cached/fallback tickers if Wikipedia download fails"
     ),
     provider: WikipediaTickerProvider = Depends(get_provider),
-):
+) -> TickerResponse:
     """Return the cached (or freshly downloaded) list of constituents."""
     tickers: Optional[List[str]] = None
     source = "cache"
@@ -130,7 +130,7 @@ async def get_sp500_tickers(
 
 
 @app.post("/refresh", response_model=RefreshResponse)
-async def refresh_tickers(provider: WikipediaTickerProvider = Depends(get_provider)):
+async def refresh_tickers(provider: WikipediaTickerProvider = Depends(get_provider)) -> RefreshResponse:
     """Explicit refresh endpoint that always pulls the latest file."""
     try:
         tickers = provider.get_remote_constituents()

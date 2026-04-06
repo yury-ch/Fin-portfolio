@@ -206,14 +206,12 @@ class TestStockData:
         assert body["success"] is True
         assert isinstance(body["data"], dict)
 
-    def test_returns_success_false_on_exception(self, client):
+    def test_returns_500_on_exception(self, client):
         with patch("services.data_service.data_service.load_prices",
                    side_effect=RuntimeError("yahoo down")):
             r = client.post("/stock-data", json={"tickers": ["AAPL"], "period": "1y", "interval": "1d"})
-        assert r.status_code == 200
-        body = r.json()
-        assert body["success"] is False
-        assert "yahoo down" in body["error"]
+        assert r.status_code == 500
+        assert "yahoo down" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -233,13 +231,8 @@ class TestSp500Analysis:
         assert len(body["data"]["records"]) == 2
         assert body["data"]["metadata"] is not None
 
-    def test_http_exception_swallowed_as_success_false(self, client):
-        """BUG: broad `except Exception` in /sp500-analysis catches HTTPException,
-        returning HTTP 200 success=False instead of the intended HTTP 503.
-        This test documents the current (buggy) behavior.
-        Fix: re-raise HTTPException before the generic except, or use
-        `except Exception as e: if isinstance(e, HTTPException): raise`.
-        """
+    def test_http_exception_propagates_status_code(self, client):
+        """HTTPException is re-raised with its original status code."""
         from fastapi import HTTPException
         with patch("services.data_service.data_service.analyze_sp500_stocks",
                    side_effect=HTTPException(status_code=503, detail="cache missing")):
@@ -247,13 +240,13 @@ class TestSp500Analysis:
                             json={"tickers": ["AAPL"], "period": "1y"})
         assert r.status_code == 503
 
-    def test_returns_success_false_on_generic_exception(self, client):
+    def test_returns_500_on_generic_exception(self, client):
         with patch("services.data_service.data_service.analyze_sp500_stocks",
                    side_effect=RuntimeError("unexpected")):
             r = client.post("/sp500-analysis",
                             json={"tickers": ["AAPL"], "period": "1y"})
-        assert r.status_code == 200
-        assert r.json()["success"] is False
+        assert r.status_code == 500
+        assert "unexpected" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

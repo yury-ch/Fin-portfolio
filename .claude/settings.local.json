@@ -3,16 +3,20 @@
     "allow": [
       "Bash(pkill:*)",
       "Bash(python:*)",
+      "Bash(python3:*)",
       "Bash(git add:*)",
-      "Bash(./run-monolith.sh:*)",
       "Bash(pip install:*)",
       "Bash(./run-microservices.sh:*)",
+      "Bash(./run-price-sync.sh:*)",
+      "Bash(./run-analysis-sync.sh:*)",
+      "Bash(docker compose:*)",
       "Bash(lsof:*)",
       "Bash(kill:*)",
       "Bash(awk:*)",
       "Bash(xargs kill:*)",
       "Bash(curl:*)",
-      "Bash(source:*)"
+      "Bash(source:*)",
+      "Bash(streamlit:*)"
     ],
     "deny": [],
     "ask": []

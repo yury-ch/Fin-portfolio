@@ -12,7 +12,10 @@ The system is an internal analyst tool that:
 2. Downloads and caches historical price data from Yahoo Finance
 3. Computes per-ticker financial metrics (return, volatility, Sharpe, drawdown, momentum)
 4. Runs mean-variance portfolio optimization against a user-selected ticker subset
-5. Presents results through an interactive web UI
+5. Forecasts returns using an ensemble of Monte Carlo, CAPM, and trend models
+6. Backtests forecast accuracy on historical rolling windows
+7. Compares historical vs forward-looking optimised allocations
+8. Presents results through an interactive web UI with a guided tab workflow
 
 **Primary user:** a single analyst on a local machine or a small private server. The system is not designed for multi-user concurrency or public internet exposure.
 
@@ -41,10 +44,14 @@ The system is an internal analyst tool that:
 │  │   port 8002      │   │     port 8501                   │ │
 │  │  FastAPI         │   │  Streamlit                      │ │
 │  │                  │   │                                 │ │
-│  │ PyPortfolioOpt   │   │ S&P 500 Stock Analyzer tab      │ │
-│  │ optimization     │   │ Portfolio Optimizer tab         │ │
-│  │ metrics calc     │   │ Data Health tab                 │ │
-│  └─────────────────┘   │ Universe Changes tab            │ │
+│  │ PyPortfolioOpt   │   │ Tabs (left → right workflow):   │ │
+│  │ optimization     │   │  Data Health                    │ │
+│  │ forecast engine  │   │  Analyzer                       │ │
+│  │ (MC+CAPM+Trend)  │   │  Optimizer                      │ │
+│  └─────────────────┘   │  Forecast                       │ │
+│                         │  Backtest                       │ │
+│                         │  Compare                        │ │
+│                         │  Universe                       │ │
 │                         └─────────────────────────────────┘ │
 │                                                             │
 │  docker-entrypoint.sh: starts services in dependency order  │
@@ -63,7 +70,9 @@ All four services import from `shared/`:
 | `analysis_engine.py` | Canonical metrics computation and composite scoring |
 | `price_loader.py` | Parquet cache read/write, normalization, Yahoo Finance wrapper |
 | `ticker_provider.py` | Wikipedia scraper with CSV cache and embedded fallback |
-| `models.py` | Pydantic request/response models shared across services |
+| `models.py` | Pydantic v2 request/response models shared across services |
+| `settings.py` | Centralised configuration via `pydantic BaseSettings` (env vars) |
+| `config.py` | Algorithmic constants (risk-free rate, scoring weights, thresholds) |
 
 ### 2.3 Offline Jobs
 
@@ -85,11 +94,11 @@ Two data pipeline scripts run outside the request path, invoked manually or via 
 
 **Decision:** All four services run inside one Docker container via `docker-entrypoint.sh`, not as separate containers.
 
-**Why:** Services communicate over `localhost` with hardcoded URLs (`http://localhost:8001`). Multi-container Compose would require either a service-discovery layer or centralised environment-variable configuration (neither of which exists yet). Running multiple processes in one container is a pragmatic tradeoff for a single-user tool.
+**Why:** Services communicate over `localhost` with configurable URLs. Running multiple processes in one container is a pragmatic tradeoff for a single-user tool.
 
 **Trade-off accepted:** Crash isolation is weak — a fatal error in one service does not restart the others. Restart policies in `docker-compose.yml` mitigate this at the container level, not the process level.
 
-**Evolution path:** Replace hardcoded URLs with `pydantic BaseSettings` env-var config (tracked as P3 in TECHNICAL_DEBT.md), then split into separate Compose services with proper `depends_on`.
+**Resolved (F-05):** Service URLs are now centralised in `shared/settings.py` via `pydantic BaseSettings`, configurable through environment variables. The remaining step is splitting into separate Compose services with proper `depends_on`.
 
 ---
 
@@ -180,7 +189,7 @@ Two data pipeline scripts run outside the request path, invoked manually or via 
 - Service startup was fragile — no health checks, no dependency ordering. `docker-entrypoint.sh` now implements `wait_for_healthy()` with configurable retries.
 - The UI recomputed analysis on every widget interaction. Separated into offline sync + cached read.
 
-**What was NOT changed during migration:** Service URLs remain hardcoded as `localhost:800x`. Centralising these as environment variables is the next planned step (P3 in TECHNICAL_DEBT.md).
+**Subsequent improvements:** Service URLs were centralised via `shared/settings.py` (F-05). Forecast, backtest, and compare tabs were added to close the analysis loop (F-02, F-03).
 
 ---
 
@@ -222,8 +231,14 @@ Browser ──► presentation_service (Streamlit :8501)
                 ├── POST /stock-data ──► data_service (:8001)
                 │                           └── price_cache/*.parquet
                 │
-                └── POST /optimize-portfolio ──► calculation_service (:8002)
-                                                    └── PyPortfolioOpt
+                ├── POST /optimize-portfolio ──► calculation_service (:8002)
+                │                                    └── PyPortfolioOpt
+                │
+                ├── POST /forecast-returns ──► calculation_service (:8002)
+                │                                  └── MC + CAPM + Trend ensemble
+                │
+                └── POST /backtest ──► calculation_service (:8002)
+                                           └── Rolling-window forecast validation
 ```
 
 ---
@@ -292,11 +307,15 @@ Run with: `pytest` (configured via `pytest.ini`).
 
 ## 8. Known Issues and Next Steps
 
-See [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) for the full prioritised backlog. High-priority items:
+See [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) for the full prioritised backlog (T-01 through T-12).
 
+**Resolved since initial architecture:**
+- ~~Hardcoded `localhost:800x` URLs~~ → centralised in `shared/settings.py` (F-05)
+- ~~Monolithic `app.py`~~ → deleted after microservices reached feature parity
+
+**Current P1 items:**
 | Item | Impact |
 |---|---|
-| `POST /sp500-analysis` swallows `HTTPException` — returns HTTP 200 on cache-miss instead of 503 | Clients cannot distinguish error types |
-| Hardcoded `localhost:800x` URLs in service code | Cannot deploy multi-container without code change |
-| Unpinned dependencies | Builds not reproducible |
-| No metrics or structured logging | Silent failures in nightly jobs |
+| T-01: Dockerfile floating dependencies | Builds not reproducible |
+| T-02: FastAPI missing return type annotations | Docs/validation incomplete |
+| T-03: Silent exception swallowing in data_service | Clients cannot distinguish error types |

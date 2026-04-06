@@ -322,11 +322,11 @@ app = FastAPI(
 )
 
 @app.get("/health")
-async def health_check():
+async def health_check() -> dict:
     return {"status": "healthy", "service": "data_service"}
 
 @app.post("/stock-data")
-async def get_stock_data(request: StockDataRequest):
+async def get_stock_data(request: StockDataRequest) -> ServiceResponse:
     """Get stock price data"""
     try:
         prices = data_service.load_prices(request.tickers, request.period, request.interval)
@@ -335,21 +335,20 @@ async def get_stock_data(request: StockDataRequest):
             success=True,
             data=prices.to_dict('index')
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in get_stock_data: {e}")
-        return ServiceResponse(
-            success=False,
-            error=str(e)
-        )
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.post("/sp500-analysis")
-async def get_sp500_analysis(request: StockAnalysisRequest):
+async def get_sp500_analysis(request: StockAnalysisRequest) -> ServiceResponse:
     """Get S&P 500 stock analysis"""
     try:
         tickers = request.tickers or data_service.get_sp500_universe()
         analysis_df, metadata = data_service.analyze_sp500_stocks(
-            tickers, 
-            request.period, 
+            tickers,
+            request.period,
             request.force_refresh
         )
         return ServiceResponse(
@@ -363,13 +362,10 @@ async def get_sp500_analysis(request: StockAnalysisRequest):
         raise
     except Exception as e:
         logger.error(f"Error in get_sp500_analysis: {e}")
-        return ServiceResponse(
-            success=False,
-            error=str(e)
-        )
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/cache-info")
-async def get_cache_info():
+async def get_cache_info() -> ServiceResponse:
     """Get cache status information"""
     try:
         cache_info = data_service.get_cache_info()
@@ -377,15 +373,14 @@ async def get_cache_info():
             success=True,
             data=cache_info.model_dump()
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in get_cache_info: {e}")
-        return ServiceResponse(
-            success=False,
-            error=str(e)
-        )
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.delete("/cache")
-async def clear_cache(period: Optional[str] = Query(default=None, description="Period to clear (e.g., 1y). Omit to clear all.")):
+async def clear_cache(period: Optional[str] = Query(default=None, description="Period to clear (e.g., 1y). Omit to clear all.")) -> ServiceResponse:
     """Clear cached analysis data."""
     removed = data_service.clear_cache(period)
     return ServiceResponse(
@@ -394,13 +389,13 @@ async def clear_cache(period: Optional[str] = Query(default=None, description="P
     )
 
 @app.get("/sp500-tickers")
-async def get_sp500_tickers():
+async def get_sp500_tickers() -> ServiceResponse:
     """Get list of S&P 500 sample tickers"""
     tickers = data_service.get_sp500_universe()
     return ServiceResponse(success=True, data=tickers)
 
 @app.get("/price-cache-info")
-async def get_price_cache_info():
+async def get_price_cache_info() -> ServiceResponse:
     """Get per-period price cache metadata (last synced, tickers, rows, data_through)."""
     try:
         summary = data_service.price_cache.cache_summary()
@@ -411,12 +406,14 @@ async def get_price_cache_info():
                 for k, v in meta.items()
             }
         return ServiceResponse(success=True, data=serializable)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in get_price_cache_info: {e}")
-        return ServiceResponse(success=False, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/ticker-validation")
-async def get_ticker_validation():
+async def get_ticker_validation() -> ServiceResponse:
     """Return the most recent ticker validation result from sp500_data/validation/."""
     try:
         import json
@@ -428,10 +425,10 @@ async def get_ticker_validation():
             return ServiceResponse(success=True, data=json.load(f))
     except Exception as e:
         logger.error(f"Error in get_ticker_validation: {e}")
-        return ServiceResponse(success=False, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/sync-report")
-async def get_sync_report():
+async def get_sync_report() -> ServiceResponse:
     """Return the latest price sync report written by price_sync_service."""
     try:
         import json
@@ -442,10 +439,10 @@ async def get_sync_report():
             return ServiceResponse(success=True, data=json.load(f))
     except Exception as e:
         logger.error(f"Error in get_sync_report: {e}")
-        return ServiceResponse(success=False, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/ticker-changes")
-async def get_ticker_changes():
+async def get_ticker_changes() -> ServiceResponse:
     """Derive a chronological change log from all validation snapshot files."""
     try:
         import json

@@ -975,10 +975,12 @@ with tab_optimizer:
             investment,
             risk_free,
         )
+        opt_in = st.session_state.get('optimization_input_tickers', [])
         opt_t = st.session_state.get('optimization_tickers', [])
-        if opt_t:
+        if opt_in:
+            pruned_note = f" ({len(opt_t)} after pruning)" if opt_t and len(opt_t) != len(opt_in) else ""
             st.caption(
-                f"Portfolio locked ({len(opt_t)} stocks). "
+                f"Portfolio locked — {len(opt_in)} stocks input{pruned_note}. "
                 "➡️ Next: **🔮 Forecast** tab — select **Use Portfolio Tickers** to forecast these stocks."
             )
 
@@ -1548,15 +1550,14 @@ with tab_forecast:
 
     # ── Ticker selection ───────────────────────────────────────────────────────
     st.subheader("🎯 Ticker Selection")
-    _has_opt_tickers = bool(st.session_state.get('optimization_tickers'))
+    _has_opt_tickers = bool(st.session_state.get('optimization_input_tickers'))
     fc_ticker_options = ["Top N Performers", "Manual Entry"]
     if _has_opt_tickers:
         fc_ticker_options.insert(0, "Use Portfolio Tickers")
-    fc_default_mode = 0 if _has_opt_tickers else 0
     fc_stock_mode = st.radio(
         "Which stocks to forecast",
         fc_ticker_options,
-        index=fc_default_mode,
+        index=0,
         horizontal=True,
         key="fc_stock_mode",
     )
@@ -1572,8 +1573,13 @@ with tab_forecast:
         )
 
     if fc_stock_mode == "Use Portfolio Tickers":
-        fc_tickers_to_run = st.session_state['optimization_tickers']
-        st.caption(f"Using {len(fc_tickers_to_run)} tickers from the optimized portfolio.")
+        _opt_input = st.session_state['optimization_input_tickers']
+        _opt_pruned = st.session_state.get('optimization_tickers', [])
+        fc_tickers_to_run = _opt_input
+        pruned_note = (
+            f" ({len(_opt_pruned)} survived weight pruning)" if _opt_pruned and len(_opt_pruned) != len(_opt_input) else ""
+        )
+        st.caption(f"Using {len(_opt_input)} tickers from the optimizer input{pruned_note}.")
     elif fc_stock_mode == "Manual Entry":
         fc_manual = st.text_input(
             "Tickers (comma-separated)",
@@ -1775,7 +1781,7 @@ with tab_backtest:
 
     # ── Ticker selection ───────────────────────────────────────────────────────
     st.subheader("🎯 Ticker Selection")
-    _has_opt = bool(st.session_state.get('optimization_tickers'))
+    _has_opt = bool(st.session_state.get('optimization_input_tickers'))
     _has_fc = bool(st.session_state.get("forecast_expected_returns"))
     bt_ticker_options = ["Manual Entry", "Use Top Performers from Analysis"]
     if _has_opt:
@@ -1791,8 +1797,13 @@ with tab_backtest:
     )
 
     if bt_stock_mode == "Use Portfolio Tickers":
-        bt_tickers = st.session_state['optimization_tickers']
-        st.caption(f"Using {len(bt_tickers)} tickers from the optimized portfolio.")
+        _bt_input = st.session_state['optimization_input_tickers']
+        _bt_pruned = st.session_state.get('optimization_tickers', [])
+        bt_tickers = _bt_input
+        pruned_note = (
+            f" ({len(_bt_pruned)} survived weight pruning)" if _bt_pruned and len(_bt_pruned) != len(_bt_input) else ""
+        )
+        st.caption(f"Using {len(_bt_input)} tickers from the optimizer input{pruned_note}.")
     elif bt_stock_mode == "Manual Entry":
         bt_tickers_raw = st.text_input(
             "Tickers (comma-separated)",

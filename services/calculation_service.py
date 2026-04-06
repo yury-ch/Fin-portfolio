@@ -347,11 +347,11 @@ calculation_service = CalculationService()
 forecast_service = ForecastService()
 
 @app.get("/health")
-async def health_check():
+async def health_check() -> dict:
     return {"status": "healthy", "service": "calculation_service"}
 
 @app.post("/optimize-portfolio")
-async def optimize_portfolio(request: PortfolioOptimizationRequest):
+async def optimize_portfolio(request: PortfolioOptimizationRequest) -> ServiceResponse:
     """Optimize portfolio allocation"""
     try:
         if not request.tickers or not request.prices_data:
@@ -393,7 +393,7 @@ async def optimize_portfolio(request: PortfolioOptimizationRequest):
         )
 
 @app.post("/portfolio-metrics")
-async def calculate_metrics(prices_data: dict, weights: Dict[str, float]):
+async def calculate_metrics(prices_data: dict, weights: Dict[str, float]) -> ServiceResponse:
     """Calculate portfolio metrics given prices and weights"""
     try:
         # Convert prices data back to DataFrame (orient='index' → dates as rows, tickers as cols)
@@ -414,7 +414,7 @@ async def calculate_metrics(prices_data: dict, weights: Dict[str, float]):
         )
 
 @app.post("/compute-stats")
-async def compute_statistics(prices_data: dict):
+async def compute_statistics(prices_data: dict) -> ServiceResponse:
     """Compute expected returns and covariance matrix"""
     try:
         # Convert prices data back to DataFrame (orient='index' → dates as rows, tickers as cols)
@@ -449,7 +449,7 @@ class BacktestRequest(BaseModel):
 
 
 @app.post("/backtest")
-async def run_backtest(request: BacktestRequest):
+async def run_backtest(request: BacktestRequest) -> dict:
     """
     Rolling backtest: run ForecastService on historical training windows and
     compare ensemble predictions to actual returns in the subsequent test period.
@@ -565,7 +565,7 @@ async def run_backtest(request: BacktestRequest):
 
 
 @app.post("/forecast-returns")
-async def forecast_returns(request: ForecastRequest):
+async def forecast_returns(request: ForecastRequest) -> ServiceResponse:
     """
     Compute 1Y and 2Y return forecasts for specified tickers using an ensemble
     of Monte Carlo GBM, CAPM, and log-linear trend regression.

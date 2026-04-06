@@ -16,7 +16,7 @@ This document outlines the key areas of technical debt in the S&P 500 Portfolio 
 | 6 | Inefficient Dockerfile / no `.dockerignore` | P3 | ✅ Resolved |
 | 7 | Hardcoded configuration | P3 | ✅ Resolved (F-05) |
 | 8 | Disorganized legacy data files | P3 | ✅ Partially resolved |
-| 9 | Unpinned dependencies | P3 | ⏳ Open |
+| 9 | Unpinned dependencies | P3 | ✅ Resolved (T-01) |
 | 10 | Drawdown score inversion — worst stocks rank highest | **P1** | ✅ Resolved |
 | 11 | `standardize_analysis_columns` drawdown corruption | **P1** | ✅ Resolved |
 | 12 | Inconsistent risk-free rate (0% / 2% / param) | P2 | ✅ Resolved |
@@ -32,6 +32,18 @@ This document outlines the key areas of technical debt in the S&P 500 Portfolio 
 | 22 | `compute-stats` / `portfolio-metrics` DataFrame transposition bug | P2 | ✅ Resolved |
 | 23 | No end-to-end tests — unit tests mock all cross-service calls | P2 | ✅ Resolved (F-10) |
 | 24 | Claude Code project commands lacked YAML frontmatter | P3 | ✅ Resolved |
+| T-01 | Dockerfile uses floating dependencies | P1 | ✅ Resolved |
+| T-02 | FastAPI endpoints lack return type annotations | P1 | ✅ Resolved |
+| T-03 | Silent exception swallowing (6 locations) | P1 | ✅ Resolved |
+| T-04 | `ServiceClient` HTTP boilerplate (13 repeated methods) | P2 | ⏳ Open |
+| T-05 | ARCHITECTURE.md stale (missing Forecast/Backtest/Compare) | P2 | ✅ Resolved |
+| T-06 | Docker image bloat (`build-essential` not cleaned) | P2 | ✅ Resolved |
+| T-07 | Session state unbounded growth | P2 | ⏳ Open |
+| T-08 | SQLite metadata store (replace scattered JSON) | P3 | ⏳ Planned (F-13) |
+| T-09 | Prometheus observability | P3 | ⏳ Planned (F-12) |
+| T-10 | Secondary price provider fallback | P3 | ⏳ Planned |
+| T-11 | Background optimization (unblock calc_service) | P3 | ⏳ Planned |
+| T-12 | Forecast confidence indicator | P3 | ⏳ Planned (F-11) |
 
 ---
 
@@ -129,21 +141,38 @@ Both endpoints called `pd.DataFrame(prices_data)` on input shaped `{ date → { 
 
 ---
 
-## ⏳ Open — Next Steps (by priority)
+## ⏳ Open — Improvement Plan (by priority)
 
-### P3 — Pin all dependencies
+### P1 — Quick Wins (< 1 hour each)
 
-**Action:** Run `pip-compile requirements-microservices.txt` to generate a fully pinned lockfile. Currently only `numpy<2` is constrained; `streamlit`, `fastapi`, `pandas`, `yfinance` etc. all float to latest.
-
-**Why:** Builds are not reproducible. A `yfinance` or `streamlit` major release could silently break the application.
+| # | Item | Action | Files |
+|---|---|---|---|
+| T-01 | Dockerfile uses floating deps | Switch `pip install` from `requirements-microservices.txt` to `requirements-lock.txt` | `Dockerfile` |
+| T-02 | FastAPI endpoints lack return types | Add `-> dict` or `-> ServiceResponse` to ~15 endpoint functions | `calculation_service.py`, `data_service.py`, `ticker_service.py` |
+| T-03 | Silent exception swallowing | Add `logger.warning()` before 6 bare `except Exception` blocks that have no logging | `data_service.py:126,460,487`, `calculation_service.py:120`, `presentation_service.py:389` |
 
 ---
 
-### P3 — Pin all dependencies (item 9)
+### P2 — Medium Effort (1–2 hours each)
 
-**Action:** Promote `requirements-lock.txt` as the Dockerfile install source (currently the Dockerfile installs from `requirements-microservices.txt`, which has floating versions).
+| # | Item | Action | Files |
+|---|---|---|---|
+| T-04 | `ServiceClient` boilerplate | Extract shared `_request()` helper — 13 methods repeat identical try/except/json/success pattern (~150 lines saved) | `presentation_service.py` |
+| T-05 | ARCHITECTURE.md stale | Update service map diagram (add Forecast/Backtest/Compare tabs), request path (add `/forecast-returns`, `/backtest`), section 8 (remove resolved items) | `ARCHITECTURE.md` |
+| T-06 | Docker image bloat | Remove `build-essential` after pip install or use multi-stage build (~80MB savings) | `Dockerfile` |
+| T-07 | Session state unbounded | Add max-entry limit or reset button for `analysis_cache` / `cache_metadata` dicts that grow per period switch | `presentation_service.py` |
 
-**Why:** Builds are not reproducible. A `yfinance` or `streamlit` major release could silently break the application.
+---
+
+### P3 — Larger Effort (3+ hours each)
+
+| # | Item | Action | Files |
+|---|---|---|---|
+| T-08 | SQLite metadata store (F-13) | Replace scattered JSON files (`metadata.json`, `sync_report.json`, `ticker_validation_*.json`) with `sp500_data/state.db` — atomic writes, queryable history | `data_service.py`, `price_sync_service.py`, `ticker_validation_service.py` |
+| T-09 | Prometheus observability (F-12) | Add `prometheus-fastapi-instrumentator` to 3 FastAPI services — request latency, error rates, cache-hit metrics | `ticker_service.py`, `data_service.py`, `calculation_service.py` |
+| T-10 | Secondary price provider | Add Polygon.io or Alpha Vantage fallback behind `YahooPriceLoader` interface — activates when Yahoo returns empty | `shared/price_loader.py` |
+| T-11 | Background optimization | Move `scipy.optimize` to FastAPI `BackgroundTasks`; UI polls `/job/{id}/status` — unblocks calc_service during 500-ticker runs | `calculation_service.py`, `presentation_service.py` |
+| T-12 | Forecast confidence indicator (F-11) | Badge per ticker based on history length + volatility — helps user gauge forecast reliability | `calculation_service.py`, `presentation_service.py` |
 
 ---
 
@@ -158,65 +187,38 @@ Forward-looking decisions that are not blocking but should inform future develop
 **Current:** Parquet for price/analysis cache; JSON files for metadata, sync reports, and validation snapshots scattered across `sp500_data/`.
 
 **Recommendation:**
-- **Keep Parquet** for price and analysis caches — columnar format is optimal for wide time-series frames (500 tickers × N days). A relational DB would be slower for these read patterns.
-- **Replace JSON metadata files** with a single SQLite database (`sp500_data/state.db`). This gives atomic writes, queryable validation history, and eliminates the need to glob for the latest `ticker_validation_*.json` file.
-- **Consider DuckDB** if ad-hoc cross-period analytics are needed in the future — it can query parquet files directly with SQL, no ETL required.
+- **Keep Parquet** for price and analysis caches — columnar format is optimal for wide time-series frames (500 tickers × N days).
+- **Replace JSON metadata files** with a single SQLite database (`sp500_data/state.db`). Atomic writes, queryable validation history, no glob-for-latest-file patterns.
+- **Consider DuckDB** if ad-hoc cross-period analytics are needed — queries Parquet directly with SQL.
 
 ---
 
 ### UI: Streamlit is appropriate now; React is the natural upgrade path
 
-**Current:** Streamlit (`presentation_service.py`).
+**Current:** Streamlit (`presentation_service.py`, 1,871 lines).
 
 **Streamlit limitations to watch:**
 - Every widget interaction reruns the entire script — performance degrades as the app grows
-- No real URL routing (can't deep-link to a ticker or saved portfolio)
-- No live data push (price streaming requires polling hacks)
+- No URL routing (can't deep-link to a ticker or saved portfolio)
+- No live data push (price streaming requires polling)
 - Poor multi-user concurrency (separate Python process per user)
 
-**Recommendation:** Streamlit is the right choice for an internal analyst tool. If the app evolves toward multi-user access, user accounts, saved portfolios, or live price streaming — migrate the UI to React/Next.js calling the existing FastAPI services. The backend is already structured for this transition.
-
----
-
-### Synchronous portfolio optimization is a latency risk
-
-**Current:** `calculation_service.py` runs `scipy.optimize` synchronously inside a FastAPI request handler. For 500 tickers over 5 years this can take 5–30 seconds and blocks the entire service for other requests.
-
-**Recommendation:** Move optimization to a background task. FastAPI's built-in `BackgroundTasks` is sufficient for single-user use; Celery + Redis for multi-user production. The UI would poll a `/job/{id}/status` endpoint instead of waiting on the HTTP response.
+**Recommendation:** Streamlit is the right choice for a single-analyst internal tool. If the app evolves toward multi-user access, saved portfolios, or live streaming — migrate the UI to React/Next.js calling the existing FastAPI services. The backend is already structured for this transition.
 
 ---
 
 ### Price data source resilience
 
-**Current:** Yahoo Finance (`yfinance`) is the sole price provider. It has no SLA, applies rate limits without warning, and changes its API structure periodically.
+**Current:** Yahoo Finance (`yfinance`) is the sole price provider. No SLA, undocumented rate limits.
 
-**Recommendation:** `YahooPriceLoader` in `shared/price_loader.py` is already well-isolated behind a clear interface. Add a secondary provider (Polygon.io free tier or Alpha Vantage) as a fallback that activates when Yahoo returns empty data for a batch. No architectural change required — just an alternative implementation of the same interface.
+**Recommendation:** `YahooPriceLoader` in `shared/price_loader.py` is isolated behind a clear interface. Add a secondary provider (Polygon.io free tier or Alpha Vantage) as a fallback — no architectural change required, just an alternative implementation.
 
 ---
 
 ### Observability
 
-**Current:** Zero metrics, zero structured logging beyond print/logger calls, zero alerting. Silent failures in nightly cron jobs (price sync, validation) are only visible when the Data Health tab is checked manually.
+**Current:** Structured `logger.*` calls across all services (no bare `print`). No metrics, no alerting. Silent failures in cron jobs only visible via manual Data Health tab check.
 
 **Recommendation:**
-- Add `prometheus-fastapi-instrumentator` to the three FastAPI services (~1 hour effort) for request latency, error rates, and cache-hit visibility.
-- Write sync job outcomes (success/failure, rows loaded, tickers failed) to the SQLite state DB (see Storage above) so the Data Health dashboard can show trend data, not just the last run.
-
----
-
-### Test coverage gaps
-
-**Current:** Tests exist for `ticker_provider` and `calculation_service`. The following are untested:
-
-| Module | Risk | Status |
-|---|---|---|
-| `price_sync_service.py` delta logic | Bug silently corrupts the price cache | ✅ `test_price_sync_service.py` (8 tests) |
-| `data_service.py` endpoints | API contract breakage goes undetected | ✅ `test_data_service.py` (24 tests) |
-| `shared/price_loader.py` | Cache normalization edge cases | ✅ `test_price_cache.py` |
-| `shared/analysis_engine.py` | Scoring formula regressions | ✅ `test_analysis_engine.py` |
-| Service-to-service integration | Unit tests mock everything; cross-service contract breaks go undetected | ✅ `tests/e2e/` (33 tests) — see F-10 |
-
-**Bugs surfaced by tests:**
-- `price_sync_service._delta_sync`: `if last_ts is None` guard is dead code — `pd.DatetimeIndex([]).max()` returns `NaT`, not `None`. Low severity.
-- `data_service.POST /sp500-analysis`: broad `except Exception` swallows `HTTPException`, returning HTTP 200 `success=False` instead of the intended HTTP 503. Clients cannot distinguish "cache missing" from other errors. Fix: re-raise `HTTPException` before the generic except block.
-- `calculation_service /compute-stats` and `/portfolio-metrics`: `pd.DataFrame(prices_data)` produced a transposed DataFrame (tickers as index, dates as columns), causing PyPortfolioOpt to compute expected returns keyed by date instead of ticker. Fixed by switching to `pd.DataFrame.from_dict(prices_data, orient='index')`. Surfaced by the e2e suite (F-10).
+- Add `prometheus-fastapi-instrumentator` to 3 FastAPI services for request latency, error rates, and cache-hit visibility.
+- Write sync job outcomes to SQLite state DB so Data Health dashboard shows trend data, not just the last run.
